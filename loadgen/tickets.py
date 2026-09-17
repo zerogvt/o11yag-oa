@@ -23,5 +23,13 @@ TICKETS = [
     (1, "C-7",  "If this isn't resolved today I'm contacting my lawyer."),
 ]
 
-POPULATION = [(customer_id, text) for weight, customer_id, text in TICKETS
-              for _ in range(weight)]
+# Build the list the load generator actually picks from.
+#
+# Each ticket above has a weight. We simply add that ticket to the list `weight`
+# times — so a ticket with weight 3 appears 3 times and a ticket with weight 1
+# appears once. random.choice() then picks uniformly from this list, which makes
+# the weight-3 tickets turn up three times as often. No probability maths needed.
+POPULATION = []
+for weight, customer_id, text in TICKETS:
+    for _ in range(weight):
+        POPULATION.append((customer_id, text))
