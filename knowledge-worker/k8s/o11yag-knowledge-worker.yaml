@@ -1,0 +1,144 @@
+# o11yag — knowledge worker (RAG over the support KB): complete manifest set.
+# Seeds its own Qdrant collection on first boot; there is no separate seed Job.
+# Apply with:  kubectl apply -f o11yag-knowledge-worker.yaml
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: o11yag-knowledge-worker-config
+  namespace: o11yag
+  labels:
+    app.kubernetes.io/name: o11yag-knowledge-worker
+    app.kubernetes.io/component: knowledge-worker
+    app.kubernetes.io/part-of: o11yag
+data:
+  SERVICE_NAME: "o11yag_knowledge_worker"
+  ENV: "production"
+  PORT: "8001"
+  WEB_CONCURRENCY: "2"
+  GUNICORN_TIMEOUT: "300"
+
+  OTEL_ENABLED: "true"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
+  TRACELOOP_TRACE_CONTENT: "false"
+
+  LITELLM_URL: "http://litellm:4000/v1"
+  CHAT_MODEL: "support-chat"
+  EMBED_MODEL: "support-embed"
+
+  QDRANT_URL: "http://qdrant:6333"
+  COLLECTION: "support_kb"
+  EMBED_DIM: "768"               # nomic-embed-text; change both together
+  TOP_K: "3"
+  # Best-match score below which we refuse to answer rather than let the model
+  # invent a policy. Tune it against the o11yag.retrieval.top_score histogram.
+  MIN_SCORE: "0.3"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: o11yag-knowledge-worker
+  namespace: o11yag
+  labels:
+    app.kubernetes.io/name: o11yag-knowledge-worker
+    app.kubernetes.io/component: knowledge-worker
+    app.kubernetes.io/part-of: o11yag
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: o11yag-knowledge-worker
+  ports:
+    - name: http
+      port: 8001
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: o11yag-knowledge-worker
+  namespace: o11yag
+  labels:
+    app.kubernetes.io/name: o11yag-knowledge-worker
+    app.kubernetes.io/component: knowledge-worker
+    app.kubernetes.io/part-of: o11yag
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: o11yag-knowledge-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: o11yag-knowledge-worker
+        app.kubernetes.io/component: knowledge-worker
+        app.kubernetes.io/part-of: o11yag
+    spec:
+      terminationGracePeriodSeconds: 40
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: knowledge-worker
+          image: o11yag-knowledge-worker
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8001
+          envFrom:
+            - configMapRef:
+                name: o11yag-knowledge-worker-config
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "192Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          # Startup gate. timeoutSeconds is set EXPLICITLY because it defaults
+          # to 1 second, and one second is not enough: Traceloop pulls in ~40
+          # instrumentation packages and every gunicorn worker does that import
+          # on boot, so /health cannot answer in time and the kubelet kills a
+          # pod that was coming up perfectly well ("Startup probe failed:
+          # context deadline exceeded"). 5s x 36 gives boot three minutes.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 36
+          # Liveness runs against a process whose gunicorn workers block on slow
+          # model calls, so give /health room to answer rather than restarting a
+          # pod that is merely busy.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            # readOnlyRootFilesystem: gunicorn writes worker heartbeat files here.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

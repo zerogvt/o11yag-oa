@@ -1,0 +1,135 @@
+# o11yag — LiteLLM, the model gateway.
+#
+# Every LLM and embedding call in the stack goes through here rather than
+# straight to Ollama. That is the point: a model gateway is the chokepoint where
+# routing, per-agent budgets, key custody and cost attribution live, and it is a
+# standard component of the enterprise agent architecture this repo models.
+#
+# NOTE: LiteLLM is NOT LightLLM. LiteLLM (github.com/BerriAI/litellm) is a pure
+# Python proxy that forwards to a backend; it runs no model and needs no GPU.
+#
+# SIMPLIFICATION: no master key, so the proxy is unauthenticated inside the
+# namespace. The real shape is a virtual key per agent with its own budget — do
+# that before this pattern goes anywhere near a shared cluster.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: o11yag-litellm-config
+  namespace: o11yag
+  labels:
+    app.kubernetes.io/name: o11yag-litellm
+    app.kubernetes.io/component: model-gateway
+    app.kubernetes.io/part-of: o11yag
+data:
+  config.yaml: |
+    # Logical model names the agents ask for. Swapping the backend (a hosted
+    # model, a different Ollama box) is an edit here and nowhere else — which is
+    # the reason the agents never hold a provider name.
+    model_list:
+      - model_name: support-chat
+        litellm_params:
+          model: ollama/qwen:0.5b
+          api_base: http://ollama:11434
+      - model_name: support-embed
+        litellm_params:
+          model: ollama/nomic-embed-text
+          api_base: http://ollama:11434
+
+    litellm_settings:
+      # qwen:0.5b ignores several OpenAI params; drop them instead of erroring.
+      drop_params: true
+      request_timeout: 300
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm
+  namespace: o11yag
+  labels:
+    app.kubernetes.io/name: o11yag-litellm
+    app.kubernetes.io/component: model-gateway
+    app.kubernetes.io/part-of: o11yag
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: o11yag-litellm
+  ports:
+    - name: http
+      port: 4000
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: o11yag-litellm
+  namespace: o11yag
+  labels:
+    app.kubernetes.io/name: o11yag-litellm
+    app.kubernetes.io/component: model-gateway
+    app.kubernetes.io/part-of: o11yag
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: o11yag-litellm
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: o11yag-litellm
+        app.kubernetes.io/component: model-gateway
+        app.kubernetes.io/part-of: o11yag
+      annotations:
+        # A mounted ConfigMap change doesn't restart the process; bump this
+        # (or `kubectl rollout restart`) after editing the model list.
+        o11yag.config/revision: "1"
+    spec:
+      containers:
+        - name: litellm
+          image: ghcr.io/berriai/litellm:main-stable
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/app/config/config.yaml", "--port", "4000"]
+          ports:
+            - name: http
+              containerPort: 4000
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          startupProbe:
+            httpGet:
+              path: /health/liveliness
+              port: http
+            periodSeconds: 5
+            failureThreshold: 36    # image is large and boots slowly on first run
+          livenessProbe:
+            httpGet:
+              path: /health/liveliness
+              port: http
+            periodSeconds: 20
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/readiness
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          # Not readOnlyRootFilesystem: the LiteLLM image writes to its own
+          # working dirs on boot and fails closed if it can't.
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: o11yag-litellm-config

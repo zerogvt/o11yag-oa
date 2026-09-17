@@ -1,0 +1,7 @@
+# o11yag — namespace for the whole stack.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: o11yag
+  labels:
+    app.kubernetes.io/part-of: o11yag

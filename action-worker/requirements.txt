@@ -1,0 +1,35 @@
+Flask>=3.0,<4.0
+requests>=2.31,<3.0
+# Bounded to the 26.x major: 26 added a control server that needs a
+# writable HOME, which this container deliberately does not have.
+gunicorn>=26,<27
+# Pinned to the 3.x major: 2.x/3.x changed the HTTP client (httpx -> httpx2)
+# and a major bump here has already broken this stack once.
+openai>=3.0,<4
+
+# mcp — official Model Context Protocol Python SDK, 2.x (client side).
+# See the pin note in mcp-crm/requirements.txt.
+# https://github.com/modelcontextprotocol/python-sdk
+mcp>=2.2,<3
+
+# httpx2 — the HTTP client the MCP SDK uses internally. A direct dependency here
+# only so mcp_client.py can hand the transport a client carrying a trace-context
+# event hook. NOT the same package as httpx.
+httpx2>=2.13
+
+# OpenLLMetry (Traceloop) — @agent/@tool decorators and OpenAI auto-instrumentation.
+# https://github.com/traceloop/openllmetry
+traceloop-sdk>=0.33
+
+# httpx — NOT used by this service's own code. traceloop-sdk imports it
+# (traceloop/sdk/evaluator/evaluator.py) without declaring it as a dependency,
+# so without this line the pod dies on boot with ModuleNotFoundError: httpx.
+# Nothing else pulls it in any more: openai 3.x and mcp 2.x both moved to httpx2.
+httpx>=0.27
+
+opentelemetry-exporter-otlp-proto-http>=1.24
+opentelemetry-instrumentation-flask>=0.45b0
+opentelemetry-instrumentation-requests>=0.45b0
+# For the OpenAI SDK, which does use httpx. It does NOT cover the MCP hop: the
+# MCP SDK speaks httpx2, so that context is injected by hand in mcp_client.py.
+opentelemetry-instrumentation-httpx>=0.45b0

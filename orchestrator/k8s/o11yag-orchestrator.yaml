@@ -1,0 +1,145 @@
+# o11yag — orchestrator (supervisor agent): complete manifest set.
+# Apply with:  kubectl apply -f o11yag-orchestrator.yaml
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: o11yag-orchestrator-config
+  namespace: o11yag
+  labels:
+    app.kubernetes.io/name: o11yag-orchestrator
+    app.kubernetes.io/component: orchestrator
+    app.kubernetes.io/part-of: o11yag
+data:
+  SERVICE_NAME: "o11yag_orchestrator"
+  ENV: "production"
+  PORT: "8000"
+  WEB_CONCURRENCY: "4"
+  GUNICORN_TIMEOUT: "420"        # must exceed WORKER_TIMEOUT_S
+
+  OTEL_ENABLED: "true"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
+  # The whole point of the span/record split: OpenLLMetry would otherwise put
+  # every customer message and model reply on a span. Content goes to the audit
+  # records instead, which can be routed to their own retention.
+  TRACELOOP_TRACE_CONTENT: "false"
+
+  LITELLM_URL: "http://litellm:4000/v1"
+  CHAT_MODEL: "support-chat"
+
+  KNOWLEDGE_URL: "http://o11yag-knowledge-worker:8001"
+  ACTION_URL: "http://o11yag-action-worker:8002"
+  WORKER_TIMEOUT_S: "300"
+
+  COST_PER_1K_TOKENS_USD: "0.0002"
+  AUDIT_LOG_CONTENT: "true"
+  AUDIT_MAX_TEXT_CHARS: "2000"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: o11yag-orchestrator
+  namespace: o11yag
+  labels:
+    app.kubernetes.io/name: o11yag-orchestrator
+    app.kubernetes.io/component: orchestrator
+    app.kubernetes.io/part-of: o11yag
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: o11yag-orchestrator
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: o11yag-orchestrator
+  namespace: o11yag
+  labels:
+    app.kubernetes.io/name: o11yag-orchestrator
+    app.kubernetes.io/component: orchestrator
+    app.kubernetes.io/part-of: o11yag
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: o11yag-orchestrator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: o11yag-orchestrator
+        app.kubernetes.io/component: orchestrator
+        app.kubernetes.io/part-of: o11yag
+    spec:
+      terminationGracePeriodSeconds: 40
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: orchestrator
+          image: o11yag-orchestrator
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: o11yag-orchestrator-config
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "192Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          # Startup gate. timeoutSeconds is set EXPLICITLY because it defaults
+          # to 1 second, and one second is not enough: Traceloop pulls in ~40
+          # instrumentation packages and every gunicorn worker does that import
+          # on boot, so /health cannot answer in time and the kubelet kills a
+          # pod that was coming up perfectly well ("Startup probe failed:
+          # context deadline exceeded"). 5s x 36 gives boot three minutes.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 36
+          # Liveness runs against a process whose gunicorn workers block on slow
+          # model calls, so give /health room to answer rather than restarting a
+          # pod that is merely busy.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            # readOnlyRootFilesystem: gunicorn writes worker heartbeat files here.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

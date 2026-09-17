@@ -1,0 +1,18 @@
+# mcp — official Model Context Protocol Python SDK, 2.x (MCPServer API).
+# Pinned below 3 deliberately: 2.x renamed FastMCP to MCPServer and changed the
+# field names this code uses, so a major bump is a code change, not a version bump.
+# https://github.com/modelcontextprotocol/python-sdk
+mcp>=2.2,<3
+uvicorn>=0.30
+
+traceloop-sdk>=0.33
+# httpx — NOT used by this service's own code. traceloop-sdk imports it
+# (traceloop/sdk/evaluator/evaluator.py) without declaring it as a dependency,
+# so without this line the pod dies on boot with ModuleNotFoundError: httpx.
+# Nothing else pulls it in any more: openai 3.x and mcp 2.x both moved to httpx2.
+httpx>=0.27
+
+opentelemetry-exporter-otlp-proto-http>=1.24
+opentelemetry-instrumentation-asgi>=0.45b0
+opentelemetry-instrumentation-requests>=0.45b0
+opentelemetry-instrumentation-httpx>=0.45b0

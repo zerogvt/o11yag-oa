@@ -1,0 +1,84 @@
+# o11yag — Redis, the durable-ish store behind the approval gate.
+#
+# The approvals service keeps pending/decided approval requests here so that a
+# request survives an approvals pod restart while a human is thinking about it.
+# There is deliberately NO PersistentVolume: a demo doesn't need approvals to
+# survive a Redis restart, and leaving it ephemeral keeps the cold start fast.
+# If you ever use this shape for anything real, an approval decision is exactly
+# the kind of record that must outlive its store — put it in a database.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: o11yag
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: state
+    app.kubernetes.io/part-of: o11yag
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: o11yag-redis
+  namespace: o11yag
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: state
+    app.kubernetes.io/part-of: o11yag
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis
+        app.kubernetes.io/component: state
+        app.kubernetes.io/part-of: o11yag
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999          # the "redis" user in the official image
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          imagePullPolicy: IfNotPresent
+          args: ["--save", "", "--appendonly", "no"]   # in-memory only, see header
+          ports:
+            - name: redis
+              containerPort: 6379
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "128Mi"
+          livenessProbe:
+            tcpSocket:
+              port: redis
+            periodSeconds: 15
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL

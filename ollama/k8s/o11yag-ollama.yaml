@@ -1,0 +1,160 @@
+# o11yag — Ollama, the local model backend behind the LiteLLM gateway.
+#
+# Two models are pulled, because the stack needs both halves of a RAG flow:
+#   qwen:0.5b         chat/completion  (~400MB)
+#   nomic-embed-text  embeddings       (~270MB)
+# Using Ollama for embeddings too is deliberate: it avoids pulling sentence-
+# transformers (and with it torch, ~2GB) into the knowledge worker's image.
+#
+# FIRST START IS SLOW: the init container downloads both models before the pod
+# becomes ready. They land in a PersistentVolume, so restarts are fast.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: o11yag-ollama-models
+  namespace: o11yag
+  labels:
+    app.kubernetes.io/name: ollama
+    app.kubernetes.io/component: llm-backend
+    app.kubernetes.io/part-of: o11yag
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: o11yag-ollama
+  namespace: o11yag
+  labels:
+    app.kubernetes.io/name: ollama
+    app.kubernetes.io/component: llm-backend
+    app.kubernetes.io/part-of: o11yag
+spec:
+  replicas: 1
+  # Recreate (not RollingUpdate): the model PVC is ReadWriteOnce, so only one
+  # pod can mount it at a time and a rolling update would deadlock on the mount.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ollama
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ollama
+        app.kubernetes.io/component: llm-backend
+        app.kubernetes.io/part-of: o11yag
+    spec:
+      # Ollama writes to its model dir and manages CPU/GPU runtimes, so we
+      # don't force readOnlyRootFilesystem / non-root here. Light hardening only.
+      terminationGracePeriodSeconds: 30
+
+      initContainers:
+        - name: pull-models
+          image: ollama/ollama:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: OLLAMA_HOST
+              value: "127.0.0.1:11434"
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              ollama serve &
+              pid=$!
+              echo "waiting for the ollama daemon to come up..."
+              until ollama list >/dev/null 2>&1; do sleep 1; done
+              # Both pulls are no-ops once the models are in the volume.
+              echo "pulling qwen:0.5b ..."
+              ollama pull qwen:0.5b
+              echo "pulling nomic-embed-text ..."
+              ollama pull nomic-embed-text
+              echo "pulls complete; stopping temporary daemon"
+              kill "$pid" 2>/dev/null || true
+              wait "$pid" 2>/dev/null || true
+          volumeMounts:
+            - name: models
+              mountPath: /root/.ollama
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+
+      containers:
+        - name: ollama
+          image: ollama/ollama:latest
+          imagePullPolicy: IfNotPresent
+          # OLLAMA_HOST must be 0.0.0.0 or Ollama binds to loopback only and
+          # the Service can't reach it.
+          env:
+            - name: OLLAMA_HOST
+              value: "0.0.0.0:11434"
+          ports:
+            - name: http
+              containerPort: 11434
+          resources:
+            # CPU inference for a 0.5B model plus an embedding model. Tune to
+            # your hardware; this is sized for Docker Desktop, not throughput.
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "4"
+              memory: "6Gi"
+          startupProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: models
+              mountPath: /root/.ollama
+
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: o11yag-ollama-models
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+  namespace: o11yag
+  labels:
+    app.kubernetes.io/name: ollama
+    app.kubernetes.io/component: llm-backend
+    app.kubernetes.io/part-of: o11yag
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ollama
+  ports:
+    - name: http
+      port: 11434
+      targetPort: http
+      protocol: TCP

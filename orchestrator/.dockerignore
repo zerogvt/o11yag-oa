@@ -1,0 +1,16 @@
+# Keep the build context small and secrets / dev-only files out of the image.
+.env
+.env.*
+!.env.example
+tests/
+pytest.ini
+requirements-dev.txt
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+README.md
+k8s/
+.git/
+.gitignore
