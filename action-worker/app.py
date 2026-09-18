@@ -117,7 +117,10 @@ def act(body: dict):
         if decision.get("done") or not decision.get("tool"):
             break
 
-        name, args = decision["tool"], decision.get("args") or {}
+        name = decision["tool"]
+        # A tool with no parameters may come back as {"tool": "x"} with no args
+        # key at all, or as an explicit null. Both mean "call it with nothing".
+        args = decision.get("args") or {}
 
         # The oscillation check. Identical call, identical arguments, twice: no
         # error anywhere, just wasted tokens and a longer wait for the customer.
