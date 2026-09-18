@@ -184,7 +184,26 @@ in it.
    First start is slow: Ollama downloads two models (~700MB) before it is ready,
    and the knowledge worker seeds Qdrant on its first boot.
 
-4. **Watch it work**:
+4. **Allow-list span attributes on the tenant.** Dynatrace does **not** persist
+   custom span attributes by default — it accepts them and silently drops them,
+   listing what it discarded in `supportability.non_persisted_attribute_keys`.
+   Until this is configured you lose `agent.loop.*`, `rag.*`, `mcp.*`, `step.*`
+   **and** everything OpenLLMetry emits: `gen_ai.usage.*`, `gen_ai.request.model`,
+   and the `traceloop.association.properties.*` that carry tenant / customer /
+   ticket. Metrics are a separate pipeline and are unaffected, so the dashboard
+   looks healthy while the traces are hollow.
+
+   Check with:
+   ```
+   fetch spans, from: now() - 10m
+   | filter matchesValue(dt.service.name, "o11yag_*")
+   | summarize dropped = countIf(isNotNull(`supportability.non_persisted_attribute_keys`)),
+               total = count()
+   ```
+   `dropped` must be 0. It applies to newly ingested spans only, so judge it on
+   fresh data.
+
+5. **Watch it work**:
    ```
    kubectl get pods -n o11yag -w
    kubectl logs -l app.kubernetes.io/name=o11yag-loadgen -n o11yag -f
@@ -276,6 +295,7 @@ time.
 | `agent.loop.repeated` | action worker | Identical tool + identical args, called twice. No error, just waste |
 | `agent.loop.terminated` | action worker | `done` or `max_steps` — the silent partial answer |
 | `step.index` / `step.decided_by` | action worker | Which iteration, and whether the model or the fallback chose |
+| `step.fallback_reason` | action worker | *Why* the model's answer was rejected — `unparseable`, `unknown_tool`, `missing:order_id`, `unknown:id`, `mode:rules` |
 | `gen_ai.tool.name` / `.call.arguments` | action worker | The tool call |
 | `mcp.server` / `mcp.transport` / `mcp.tools.available` | action worker | The MCP hop |
 | `approval.required` / `.decision` / `.waited_ms` / `.decided_by` | action worker | The gate |
@@ -362,12 +382,29 @@ work, none of them automatic:
   prices the tokens as if a hosted model were behind the gateway. It shows the
   attribution works; it is not a measurement. Replace it with the gateway's own
   reported cost the moment a real provider is behind LiteLLM.
-- **`qwen:0.5b` is a poor agent.** It will not reliably emit parseable tool calls,
-  so `planner.py` falls back to keyword rules and records which one decided in
-  `step.decided_by`. The flow shapes are what this demo is about, not the
-  classifier's accuracy — but never present a fallback-driven run as model
-  reasoning. Watch the fallback rate; put a bigger model behind the gateway and
-  it drops.
+- **`qwen:0.5b` is a poor tool-caller, and here is the measurement.** Over three
+  hours of live traffic it produced usable arguments for `lookup_order` **2 times
+  out of 51** — mostly passing a customer id as `{"id": "C-7"}` when the tool
+  takes `order_id` — and it declared itself finished after a single step in **39
+  of 45 runs**. `issue_refund` was never once attempted, so the approval gate was
+  never exercised. Six runs reached a second step and spent it re-calling the
+  same tool with identical arguments (`agent.loop.repeated`).
+
+  Two things in the code respond to that, and it matters which does what:
+
+  - **Argument validation** (`planner.validate_args`) holds the model to the
+    JSON schema the MCP server advertises. Wrong or missing parameters are
+    rejected and the deterministic rules take over, with `step.fallback_reason`
+    recording what was wrong. This fixes bad *arguments*.
+  - **`PLANNER_MODE=rules`** skips the model for tool selection entirely. This is
+    what makes the refund → approval → gate path reliably demonstrable.
+
+  Validation alone does **not** make refunds happen: a model that answers
+  `{"done": true}` is well-formed and in-contract, so it is still accepted and
+  the loop still ends early. Well-formed is not the same as sensible, and only
+  the second switch addresses that. Never present a `rules` run as model
+  reasoning — `step.decided_by` is in the trace precisely so you don't have to
+  take anyone's word for it.
 - **LiteLLM is unauthenticated** inside the namespace. The real shape is a virtual
   key per agent with its own budget.
 - **Audit records land in the default log bucket.** Until an OpenPipeline rule
@@ -438,6 +475,7 @@ believes it accepts.
 |--------|-----|
 | A real human approval | `AUTO_APPROVE=false` on the approvals ConfigMap, then use the page |
 | A gate that stops regardless | Send a refund for `ORD-1004` (430 EUR, over the ceiling) |
+| A refund actually reaching the gate | `PLANNER_MODE: "rules"` on the action worker ConfigMap — the local model rarely gets there on its own |
 | A loop that runs out of budget | `MAX_STEPS: "1"` on the action worker ConfigMap |
 | An ungrounded answer | Ask something the KB has no policy for |
 | A blocked tool call | Deny an approval on the page |

@@ -34,6 +34,18 @@ data:
   APPROVAL_TIMEOUT_S: "180"
   APPROVAL_POLL_S: "2"
 
+  # Who picks the next tool call: "model" or "rules".
+  #
+  # qwen:0.5b is a poor tool-caller — measured over 3h of traffic it produced
+  # usable arguments for lookup_order 2 times out of 51, and said "done" after
+  # one step in 39 of 45 runs, so issue_refund was never reached and the
+  # approval gate was never exercised.
+  #
+  # Set this to "rules" for a demo that must reach a consequential tool. Every
+  # step it decides is tagged step.decided_by=fallback in the trace, so a
+  # rules-driven run can never be mistaken for model reasoning.
+  PLANNER_MODE: "model"
+
   # Loop budget. Lower it to make the "hit its budget and returned a partial
   # answer" case easy to produce on demand.
   MAX_STEPS: "4"

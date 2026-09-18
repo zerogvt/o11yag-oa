@@ -13,6 +13,7 @@ import json
 import re
 
 import llm
+from config import Config
 
 ORDER_RE = re.compile(r"\bORD-\d+\b", re.I)
 
@@ -66,13 +67,74 @@ def _fallback(text: str, history):
     return {"done": True}
 
 
+def _schema_for(name: str, tools):
+    for tool_name, _, tool_schema in tools:
+        if tool_name == name:
+            return tool_schema or {}
+    return {}
+
+
+def validate_args(name: str, args, tools):
+    """Check the model's proposed arguments against the tool's own JSON schema.
+
+    Returns None when they are usable, otherwise a short reason string that ends
+    up on the span as `step.fallback_reason`.
+
+    This exists because a model's answer can be perfectly well-formed and still
+    nonsense. qwen:0.5b routinely proposes lookup_order({"id": "C-7"}) — valid
+    JSON, real tool name, but `id` is not a parameter and C-7 is a customer, not
+    an order. Accepting it produced a tool error and a wasted round trip. The MCP
+    server already advertises the parameter names in `input_schema`, so the
+    cheapest guard is to hold the model to the contract the server published.
+    """
+    schema = _schema_for(name, tools)
+    properties = schema.get("properties") or {}
+    if not isinstance(args, dict):
+        return "args_not_object"
+    if not properties:
+        return None          # the server advertised nothing to check against
+
+    required = schema.get("required") or []
+    missing = []
+    for field in required:
+        if field not in args:
+            missing.append(field)
+    if missing:
+        return "missing:" + ",".join(sorted(missing))
+
+    unknown = []
+    for field in args:
+        if field not in properties:
+            unknown.append(field)
+    if unknown:
+        return "unknown:" + ",".join(sorted(unknown))
+
+    return None
+
+
+def _rules_decision(text: str, history, customer_id: str):
+    decision = _fallback(text, history)
+    if decision.get("tool") == "_needs_customer":
+        decision = {"tool": "list_customer_orders", "args": {"customer_id": customer_id}}
+    return decision
+
+
 def next_step(text: str, tools, history, customer_id: str):
-    """Return (decision_dict, tokens, decided_by)."""
+    """Return (decision_dict, tokens, decided_by, fallback_reason).
+
+    `fallback_reason` is None when the model's own answer was used, and otherwise
+    says why it was rejected — so a trace shows not just that the rules decided,
+    but what the model got wrong.
+    """
+    if Config.PLANNER_MODE == "rules":
+        # The model is not consulted at all. Deterministic, and honest about it.
+        return _rules_decision(text, history, customer_id), 0, "fallback", "mode:rules"
+
     catalogue = "\n".join(f"- {name}: {desc}" for name, desc, _ in tools)
-    transcript = "\n".join(
-        f"called {h['tool']}({json.dumps(h['args'])}) -> {json.dumps(h['result'])[:300]}"
-        for h in history
-    ) or "nothing yet"
+    steps = []
+    for h in history:
+        steps.append(f"called {h['tool']}({json.dumps(h['args'])}) -> {json.dumps(h['result'])[:300]}")
+    transcript = "\n".join(steps) or "nothing yet"
 
     tokens = 0
     try:
@@ -87,11 +149,20 @@ def next_step(text: str, tools, history, customer_id: str):
     except Exception:
         obj = None
 
-    known = {name for name, _, _ in tools}
-    if obj and (obj.get("done") or obj.get("tool") in known):
-        return obj, tokens, "model"
+    known = set()
+    for name, _, _ in tools:
+        known.add(name)
 
-    decision = _fallback(text, history)
-    if decision.get("tool") == "_needs_customer":
-        decision = {"tool": "list_customer_orders", "args": {"customer_id": customer_id}}
-    return decision, tokens, "fallback"
+    reason = None
+    if not obj:
+        reason = "unparseable"
+    elif obj.get("done"):
+        return obj, tokens, "model", None
+    elif obj.get("tool") not in known:
+        reason = "unknown_tool"
+    else:
+        reason = validate_args(obj["tool"], obj.get("args") or {}, tools)
+
+    if reason is None:
+        return obj, tokens, "model", None
+    return _rules_decision(text, history, customer_id), tokens, "fallback", reason

@@ -109,7 +109,8 @@ def act(body: dict):
                 "outcome": "error", "tokens": 0, "llm_calls": 0}
 
     for step in range(Config.MAX_STEPS):
-        decision, step_tokens, decided_by = planner.next_step(text, tools, history, customer_id)
+        decision, step_tokens, decided_by, why = planner.next_step(
+            text, tools, history, customer_id)
         tokens += step_tokens
         llm_calls += 1
 
@@ -128,6 +129,12 @@ def act(body: dict):
         with tracer.start_as_current_span(f"step_{step}") as step_span:
             step_span.set_attribute("step.index", step)
             step_span.set_attribute("step.decided_by", decided_by)
+            if why:
+                # Why the model's answer was not used — "unparseable",
+                # "unknown_tool", "missing:order_id", "unknown:id", or
+                # "mode:rules". Without this the trace shows that the rules
+                # decided but not what the model got wrong.
+                step_span.set_attribute("step.fallback_reason", why)
             result = invoke(name, args, ticket_id, customer_id)
 
         history.append({"tool": name, "args": args, "result": result})

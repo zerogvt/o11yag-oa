@@ -22,6 +22,19 @@ class Config:
     APPROVAL_TIMEOUT_S = float(os.getenv("APPROVAL_TIMEOUT_S", "180"))
     APPROVAL_POLL_S = float(os.getenv("APPROVAL_POLL_S", "2"))
 
+    # Who picks the next tool call.
+    #   model  — ask the LLM, and fall back to the deterministic rules only when
+    #            its answer is unusable (unparseable, unknown tool, or arguments
+    #            that do not match the tool's advertised schema)
+    #   rules  — skip the LLM entirely for tool selection
+    #
+    # "rules" exists because a small local model is a poor tool-caller, and a demo
+    # that never reaches a consequential tool never exercises the approval gate.
+    # It is not a better agent — it is a deterministic stand-in, and every step it
+    # decides is labelled `step.decided_by=fallback` in the trace so a run can
+    # never be passed off as model reasoning.
+    PLANNER_MODE = os.getenv("PLANNER_MODE", "model").strip().lower()
+
     # The loop budget. An agent that cannot terminate is the failure mode with no
     # equivalent in a request/response service, and a cap is the only control
     # that always works — every other guard depends on noticing first.
