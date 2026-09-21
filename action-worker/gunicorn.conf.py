@@ -4,6 +4,19 @@ import os
 bind = f"0.0.0.0:{os.getenv('PORT', '8002')}"
 workers = int(os.getenv("WEB_CONCURRENCY", "2"))
 
+# Threads, not just more processes. Every long stretch of a ticket — the model
+# calls and the approval poll loop — is a blocking HTTP wait, and a sync worker
+# is held whole for its duration. With two sync workers, two tickets in flight
+# leave nobody to answer /health: the liveness probe fails three times and
+# Kubernetes restarts a pod that was merely busy. That is not hypothetical, it
+# killed a refund one poll tick before the approval came back. Raising the
+# probe's timeoutSeconds cannot fix it either, because the handler is not slow
+# — it is never scheduled. gthread hands the request to a thread and leaves the
+# worker free, so /health still answers while the loop is parked on someone
+# else's ticket.
+worker_class = os.getenv("GUNICORN_WORKER_CLASS", "gthread")
+threads = int(os.getenv("GUNICORN_THREADS", "8"))
+
 # A ticket here can sit through several model calls AND a human approval, so the
 # worker timeout must exceed APPROVAL_TIMEOUT_S plus the loop's own time or
 # gunicorn kills the worker while a reviewer is still deciding.

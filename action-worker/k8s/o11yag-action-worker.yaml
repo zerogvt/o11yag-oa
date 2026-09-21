@@ -18,6 +18,7 @@ data:
   ENV: "production"
   PORT: "8002"
   WEB_CONCURRENCY: "2"
+  GUNICORN_THREADS: "8"          # blocking waits are threads, not processes
   GUNICORN_TIMEOUT: "600"        # must outlast APPROVAL_TIMEOUT_S + the loop
 
   OTEL_ENABLED: "true"
@@ -128,16 +129,20 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 5
             failureThreshold: 36
-          # Liveness runs against a process whose gunicorn workers block on slow
-          # model calls, so give /health room to answer rather than restarting a
-          # pod that is merely busy.
+          # Liveness runs against a process whose request threads block on slow
+          # model calls and on the approval wait, so give /health room to answer
+          # rather than restarting a pod that is merely busy. timeoutSeconds is
+          # the wrong dial for that on its own — /health is trivial, it just has
+          # to be scheduled — which is why the worker class is gthread. This
+          # threshold is the second half of the same fix: 6 x 10s of silence
+          # before a restart, comfortably past a single slow ticket.
           livenessProbe:
             httpGet:
               path: /health
               port: http
             periodSeconds: 10
             timeoutSeconds: 5
-            failureThreshold: 3
+            failureThreshold: 6
           readinessProbe:
             httpGet:
               path: /health
