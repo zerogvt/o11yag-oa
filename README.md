@@ -9,6 +9,10 @@ Built to run on [Kubernetes on Docker Desktop](https://www.docker.com/blog/how-t
 and [WSL](https://learn.microsoft.com/en-us/windows/wsl/install), but nothing in
 it is local-only.
 
+> **New to agentic architecture?** Start with
+> [`docs/WALKTHROUGH.md`](docs/WALKTHROUGH.md) — a guided read of this codebase
+> for someone who knows observability but not agents.
+
 ## Why
 
 The interesting half of agent observability is not "instrument the LLM call".
