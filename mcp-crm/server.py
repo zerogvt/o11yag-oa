@@ -68,6 +68,14 @@ def issue_refund(order_id: str, amount_eur: float, reason: str = "") -> dict:
     order = data.ORDERS.get(order_id)
     if not order:
         return {"ok": False, "error": "unknown_order", "order_id": order_id}
+    # The status this function sets on its way out is also a guard on the way
+    # in. An agent loop can retry a step, a customer can open a second ticket
+    # about the same order, and the load generator replays one ticket forever —
+    # all of which reached this line and moved the money again. An approval is
+    # permission to refund this order once, not a licence to refund it twice.
+    if order["status"] == "refunded":
+        return {"ok": False, "error": "already_refunded", "order_id": order_id,
+                "customer_id": order["customer_id"]}
     if amount_eur > order["total_eur"]:
         return {"ok": False, "error": "amount_exceeds_order_total",
                 "order_id": order_id, "order_total_eur": order["total_eur"]}
