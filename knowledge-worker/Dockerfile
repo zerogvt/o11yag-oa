@@ -28,7 +28,7 @@ ENV PATH="/opt/venv/bin:$PATH" \
     PORT=8001 \
     WEB_CONCURRENCY=2
 
-COPY app.py config.py llm.py kb.py retrieval.py o11y.py gunicorn.conf.py ./
+COPY app.py config.py llm.py kb.py retrieval.py judge.py security.py o11y.py gunicorn.conf.py ./
 
 USER appuser
 

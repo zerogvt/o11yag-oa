@@ -36,6 +36,8 @@ except ImportError:      # telemetry off / SDK absent — keep the service runna
 
     task = workflow
 
+from opentelemetry import trace  # noqa: E402
+
 import llm  # noqa: E402  (imported after init so the OpenAI client is instrumented)
 
 INTENTS = ("question", "order_action", "escalate")
@@ -126,7 +128,7 @@ def handle(body: dict):
     with o11y.timed() as elapsed:
         intent, tokens, how = classify(text)
         llm_calls = 1
-        outcome, answer = "ok", ""
+        outcome, answer, quality = "ok", "", ""
 
         try:
             if intent == "question":
@@ -135,6 +137,11 @@ def handle(body: dict):
                 answer = res.get("answer", "")
                 tokens += res.get("tokens", 0)
                 llm_calls += res.get("llm_calls", 0)
+                # The knowledge worker graded its own answer. Carrying the
+                # verdict up here puts it in the ticket's audit record next to
+                # the cost, which is where anyone asking "what did we spend on
+                # answers we then judged unsupported" has to start.
+                quality = res.get("quality", "")
             elif intent == "order_action":
                 res = delegate(f"{Config.ACTION_URL}/act",
                                {"ticket_id": ticket_id, "customer_id": customer_id, "text": text})
@@ -166,20 +173,67 @@ def handle(body: dict):
         "o11yag.ticket.handled",
         ticket_id=ticket_id, customer_id=customer_id, tenant=tenant,
         intent=intent, intent_source=how, outcome=outcome,
+        quality=quality or None,
         latency_ms=round(ms, 1), llm_calls=llm_calls, tokens=tokens,
         cost_usd=round(cost, 6),
         content_mode="text" if Config.AUDIT_LOG_CONTENT else "omitted:disabled",
         **content,
     )
 
+    # The trace id goes back to the caller so that feedback arriving later can
+    # name the trace it is about. Without it the only join is the ticket id, and
+    # a thumbs-down is then a record you can count but not open.
+    ctx = trace.get_current_span().get_span_context()
     return {"ticket_id": ticket_id, "intent": intent, "outcome": outcome,
             "answer": answer, "tokens": tokens, "llm_calls": llm_calls,
-            "cost_usd": round(cost, 6), "latency_ms": round(ms, 1)}
+            "cost_usd": round(cost, 6), "latency_ms": round(ms, 1),
+            "quality": quality,
+            "trace_id": format(ctx.trace_id, "032x") if ctx.trace_id else ""}
 
 
 @app.post("/chat")
 def chat_route():
     return jsonify(handle(request.get_json(force=True, silent=True) or {}))
+
+
+@app.post("/feedback")
+def feedback_route():
+    """A human's verdict on an answer that already went out.
+
+    The other half of gap 1, and the half that cannot be faked. Everything else
+    in this stack is the stack's opinion of itself: the retrieval floor, the
+    judge, the loop signals. All of them can be confidently, consistently wrong
+    together, and when they are, nothing internal disagrees. This endpoint is
+    the only input that can.
+
+    It lives on the orchestrator because the orchestrator owns the ticket — the
+    same place the cost and the intent were recorded, so the verdict lands
+    beside them rather than in a system nobody joins to.
+
+    It is a separate request, minutes or days later, on a trace of its own.
+    `subject_trace_id` is what makes it navigable: it is the trace being graded,
+    which the caller got back from /chat. `audit.trace_id` on the same record is
+    this request's trace, and confusing the two is the mistake that makes a
+    feedback store look correct and pivot to nothing.
+
+    Deliberately unauthenticated and unvalidated beyond the shape, like the rest
+    of the stack. In a real deployment the rating has to be attributable, or the
+    series is a vote anyone can stuff.
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    ticket_id = str(body.get("ticket_id", "")).strip()
+    rating = str(body.get("rating", "")).strip().lower()
+    if not ticket_id or rating not in ("up", "down"):
+        return jsonify({"error": "ticket_id and rating (up|down) are required"}), 400
+
+    intent = str(body.get("intent", "unknown"))
+    tenant = str(body.get("tenant", "acme"))
+    o11y.feedback_received(rating=rating, intent=intent, tenant=tenant)
+    o11y.audit("o11yag.feedback.received",
+               ticket_id=ticket_id, rating=rating, intent=intent, tenant=tenant,
+               subject_trace_id=str(body.get("trace_id", ""))[:32] or None,
+               comment=str(body.get("comment", ""))[: Config.AUDIT_MAX_TEXT_CHARS] or None)
+    return jsonify({"ok": True, "ticket_id": ticket_id, "rating": rating})
 
 
 @app.get("/health")

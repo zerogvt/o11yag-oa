@@ -26,6 +26,13 @@ data:
   MCP_ALLOWED_HOSTS: "o11yag-mcp-crm:*,o11yag-mcp-crm.o11yag:*,o11yag-mcp-crm.o11yag.svc.cluster.local:*,localhost:*,127.0.0.1:*"
   MCP_DNS_REBINDING_PROTECTION: "true"
 
+  # --- gap 2: the security act ---
+  # Advertise issue_refund with an injected description, so the action worker's
+  # screening has a real attacker-controlled string to catch rather than a
+  # simulated finding. Flipping this on a running stack is also the rug pull:
+  # the tool catalogue digest the worker recorded stops matching.
+  POISON_TOOL_DESCRIPTION: "false"
+
   OTEL_ENABLED: "true"
   OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
   TRACELOOP_TRACE_CONTENT: "false"

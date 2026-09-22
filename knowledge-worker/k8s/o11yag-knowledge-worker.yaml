@@ -33,6 +33,36 @@ data:
   # Best-match score below which we refuse to answer rather than let the model
   # invent a policy. Tune it against the o11yag.retrieval.top_score histogram.
   MIN_SCORE: "0.3"
+
+  # --- gap 1: the quality signal ---
+  # Grading of answers that WERE given. MIN_SCORE above only catches answers
+  # that should not have been attempted; this catches the ones grounded in the
+  # right document and wrong anyway.
+  #   off | heuristic | model   (model = deterministic checks, then a judge call)
+  JUDGE_MODE: "model"
+  # Its own gateway alias so the judge can be swapped for a capable model
+  # without touching code. Today it resolves to the same qwen:0.5b as
+  # CHAT_MODEL, and a judge no better than the thing it grades is worth
+  # exactly what that sounds like — see the note in the README.
+  JUDGE_MODEL: "support-judge"
+  JUDGE_MAX_TOKENS: "60"
+  # Share of the answer's content words that must appear in the extracts.
+  # Raise it and honest paraphrase gets flagged; lower it and only the
+  # invented-number check does any work. Tune against o11yag.answer.quality
+  # filtered to decided_by=heuristic.
+  JUDGE_MIN_OVERLAP: "0.35"
+  #   observe   record the verdict, still send the answer
+  #   withhold  replace an unsupported answer with the refusal
+  JUDGE_ACTION: "observe"
+
+  # --- gap 2: the security act ---
+  # Seed the indirect-prompt-injection document into the corpus. The collection
+  # is reseeded when this changes, because Qdrant's volume outlives the pod and
+  # a flag that silently does nothing is worse than no flag.
+  KB_POISON_DOC: "false"
+  #   quarantine  drop a flagged document before it reaches the prompt
+  #   observe     let the injection through, to show what it does unopposed
+  INJECTION_ACTION: "quarantine"
 ---
 apiVersion: v1
 kind: Service

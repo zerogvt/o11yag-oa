@@ -51,6 +51,17 @@ data:
   # answer" case easy to produce on demand.
   MAX_STEPS: "4"
   CONSEQUENTIAL_TOOLS: "issue_refund"
+
+  # --- gap 2: the security act ---
+  # Expected fingerprint of the MCP tool catalogue (names, descriptions and
+  # schemas). Empty means "trust the first catalogue this pod sees", which
+  # catches a rug pull but not a server that was already poisoned at boot. The
+  # digest is logged on first sight and is on the action_worker span as
+  # mcp.tools.digest — copy it here to pin it.
+  MCP_TOOLS_DIGEST: ""
+  #   redact   blank a flagged tool description before the planner sees it
+  #   observe  prompt with it anyway, to show the attack working
+  TOOL_POISON_ACTION: "redact"
 ---
 apiVersion: v1
 kind: Service

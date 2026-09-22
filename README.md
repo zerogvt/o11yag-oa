@@ -11,7 +11,9 @@ it is local-only.
 
 > **New to agentic architecture?** Start with
 > [`docs/WALKTHROUGH.md`](docs/WALKTHROUGH.md) — a guided read of this codebase
-> for someone who knows observability but not agents.
+> for someone who knows observability but not agents. Then
+> [`docs/UPDATE-GAPS-1-2.md`](docs/UPDATE-GAPS-1-2.md) for the answer judge, the
+> feedback loop and the security act.
 
 ## Why
 
@@ -98,8 +100,8 @@ MCP-wrap the CRM, the ticketing system, the vendor API you didn't write.
 
 | Component | Port | Stack | Role |
 |-----------|------|-------|------|
-| **o11yag-orchestrator** | 8000 | Flask | Supervisor. Classifies intent, delegates to one worker, owns the per-ticket roll-up and the conversation audit record. |
-| **o11yag-knowledge-worker** | 8001 | Flask + Qdrant | RAG over the support knowledge base. Refuses to answer off a weak retrieval. |
+| **o11yag-orchestrator** | 8000 | Flask | Supervisor. Classifies intent, delegates to one worker, owns the per-ticket roll-up, the conversation audit record and the `/feedback` endpoint. |
+| **o11yag-knowledge-worker** | 8001 | Flask + Qdrant | RAG over the support knowledge base. Refuses to answer off a weak retrieval, screens what it retrieved for injected instructions, and grades the answer it gave. |
 | **o11yag-action-worker** | 8002 | Flask + MCP client | The agent loop. Picks tools, calls them over MCP, routes consequential ones through the gate. |
 | **o11yag-mcp-crm** | 8003 | MCP Python SDK | MCP server over Streamable HTTP exposing the fake system of record. |
 | **o11yag-approvals** | 8004 | Flask + Redis | Human-in-the-loop gate, with a reviewer page at `/`. |
@@ -132,6 +134,12 @@ decorators), `mcp` **2.2.0** (`MCPServer`, `streamable_http_client`,
 - The agent loop against that live MCP server: `lookup_order` → `issue_refund`
   → done, refunding the order's own total rather than an amount asserted in the
   customer's message.
+- The gap 1 and gap 2 logic, as pure functions, against the real corpus and a
+  real tool catalogue: zero false positives from the injection patterns across
+  all eight benign documents, the poison document caught on `override`, the
+  catalogue digest stable under reordering and moving on a changed description,
+  and the judge's heuristic separating an invented figure from grounded
+  paraphrase and from an honest refusal. Logic only — no model, no cluster.
 
 **Found only by running it in a cluster:** the MCP server's Host-header check.
 Every tool call returned 421 because the SDK auto-allows localhost and nothing
@@ -139,7 +147,12 @@ else, which the loopback test above could not have caught — it was loopback.
 
 **Not run:** anything needing a cluster. The Kubernetes deployment itself, the
 Dynatrace export, Ollama, LiteLLM and the Qdrant seed path are all unexercised —
-the manifests parse and the images build, but nothing has been deployed.
+the manifests parse and the images build, but nothing has been deployed. That
+includes both halves of gap 1 and gap 2 end to end: the judge's *model* path has
+never been asked for a verdict by a real model, the reseed that makes
+`KB_POISON_DOC` take effect has never run against a live Qdrant, and no agent has
+yet been observed complying with an injection it was fed. The detectors are
+verified; the demonstrations they exist for are not.
 
 The boot test is the one that matters most, and it is why `smoke.sh` exists: the
 services passed every static check — manifests parsed, Python compiled, imports
@@ -228,18 +241,64 @@ much faster than finding out from a CrashLoopBackOff.
 
 ## The four gaps, and what closing each one cost
 
-### 1. Silent semantic failure — *partially closed*
+### 1. Silent semantic failure — closed at the signal, open at the judge
 
-The cheapest honest guard is refusing to answer off a bad retrieval. The
-knowledge worker checks the best similarity score against `MIN_SCORE` and says
-"I don't have a policy that covers that" rather than letting the model invent
-one, emitting an `o11yag.retrieval.ungrounded` audit record when it does.
+Three guards now, at three different distances from the truth.
 
-That catches wrong answers *caused by bad retrieval*. It does not catch a
-confidently wrong answer grounded in a correct document, which is the larger half
-of the problem and needs a quality signal — an LLM judge, a thumbs-down from the
-channel — that this version does not have. **This gap is not closed.** It is the
-single most valuable thing to build next.
+**The retrieval floor** is the cheapest and runs first: the knowledge worker
+checks the best similarity score against `MIN_SCORE` and says "I don't have a
+policy that covers that" rather than letting the model invent one, emitting an
+`o11yag.retrieval.ungrounded` audit record when it does. It catches wrong answers
+*caused by* bad retrieval — and nothing else. The larger half of the problem is
+the answer that is grounded in exactly the right document and wrong anyway, and
+for that ticket every signal this stack had was green: `rag.top_score` high, no
+span in error, a confident paragraph quoting a policy that does not exist.
+
+**The judge** (`knowledge-worker/judge.py`) grades the answer it actually gave
+against the extracts it was given, on its own `judge_answer` span, and records
+`o11yag.answer.quality` by verdict. Two graders, and the deterministic one is
+not a fallback:
+
+- *heuristic* — free, runs on every answer. An amount, deadline or duration in
+  the answer that appears nowhere in the extracts (`unsupported_number:60`), or
+  an answer whose content words are largely absent from them
+  (`low_overlap:0.12`). Crude, and aimed squarely at what actually goes wrong in
+  a policy KB: the model keeps the shape of the policy and invents the figure,
+  which is the version a customer acts on.
+- *model* — a second LLM call, asked for a yes/no. The one every vendor diagram
+  draws, and the one to be most careful about here, because the judge is the
+  same `qwen:0.5b` that could not reliably emit a tool call. `JUDGE_MODEL` is a
+  separate gateway alias so a capable model can be put behind it from
+  `litellm`'s ConfigMap alone.
+
+`quality.decided_by` records which grader produced the verdict, for the same
+reason `step.decided_by` exists in the action worker: so "the judge model never
+once disagreed with the cheap check" stays a fact you can query rather than an
+assumption you inherit. A judge that returns nothing usable is recorded as
+`decided_by=heuristic, reason=model_unparseable` — not as a pass.
+
+**The thumbs-down** (`POST /feedback` on the orchestrator) is the only input in
+the whole stack that does not come from the stack. Everything else — the floor,
+the judge, the loop signals — is the system's opinion of itself, and all of it
+can be confidently and consistently wrong at once with nothing internal
+disagreeing. `/chat` returns its `trace_id` for exactly this: the feedback
+arrives minutes or days later on a trace of its own, and `audit.subject_trace_id`
+is what makes a thumbs-down openable rather than merely countable.
+
+**What it cost.** One extra model call per answered question, on the ticket's own
+latency, counted into `o11yag.task.tokens` and `.cost.usd` like any other — a
+judge you do not pay for is a judge that did not run. Set `JUDGE_MODE: heuristic`
+and the signal survives at zero marginal cost and reduced coverage.
+
+**What is still open, and it is the important part.** The judge is a detector,
+and `JUDGE_ACTION` defaults to `observe` — the unsupported answer is recorded and
+still sent. `withhold` replaces it with the refusal, and is the setting that
+actually protects the customer; it is not the default because a weak judge
+withholding good answers is a worse product than a wrong answer you can see in a
+dashboard, and nobody should flip it before measuring their own false-positive
+rate. There is also no offline evaluation set here, no regression suite, and
+nothing that feeds a thumbs-down back into retrieval or the prompt. The signal
+exists and is honest about its own quality. The loop that closes on it does not.
 
 ### 2. No baseline — closed, in the sense that the series now exists
 
@@ -276,6 +335,85 @@ inside the tool call, a reviewer who goes to lunch would swamp every latency
 percentile in the stack. Subtract it from `o11yag.task.latency` to get machine
 time.
 
+## The security act
+
+Three attacks, all specific to agents, all of which leave a normal trace looking
+perfectly healthy. Everything here is **off by default** — the reference stack
+ships a clean knowledge base and an honest tool catalogue — because an attack
+that ships enabled inside a reference architecture is indistinguishable from a
+backdoor. Each one is a ConfigMap flag away.
+
+### Indirect prompt injection through the RAG corpus
+
+The direct kind — a customer typing "ignore your instructions" — is the one
+everybody pictures and the least interesting, because that text arrives labelled
+as untrusted. The one that works is indirect: the instruction is written into a
+*document*, retrieved on its merits by a similarity search doing exactly its job,
+and reaches the model inside the context block — the part of the prompt the model
+was told to trust. Nobody typed it during the ticket that fires it. It can be
+planted months earlier by anyone who can write to the corpus: a scraped vendor
+page, a wiki, a support macro, an uploaded PDF.
+
+The reason it belongs in an observability repo is that the stack cannot see it
+happen. Retrieval is *healthy* — the poisoned document is a genuinely good match,
+so `rag.top_score` is high. No span errors. And if the model complies, the tool
+call it produces is well-formed and in-contract, so `planner.validate_args`
+passes it and `step.decided_by` says `model`. The trace reads as a normal ticket
+in which the agent decided, by itself, to issue a refund nobody asked for.
+
+`knowledge-worker/security.py` screens between retrieval and the prompt, which is
+the only point where the text is still identifiable as *retrieved* rather than
+*said*. A flagged document is dropped before the context is built
+(`INJECTION_ACTION: quarantine`) — a detector that logs the finding and prompts
+with the document anyway has recorded an attack it also carried out.
+
+`KB_POISON_DOC: "true"` seeds the demo document. Qdrant keeps its volume across a
+redeploy, so the knowledge worker compares the stored point count against the
+configured corpus and reseeds when they differ; a flag that silently does nothing
+would be a poor joke in this particular repo.
+
+### Tool poisoning
+
+An MCP tool description is attacker-controlled text that goes into the planner's
+system prompt as capability documentation, and the agent is built to act on it.
+Same signature as above: the resulting call is well-formed, in-schema and
+attributed to the model, because it was the *intent* that was supplied by an
+attacker and no schema check can see intent.
+
+`POISON_TOOL_DESCRIPTION: "true"` on the **mcp-crm** ConfigMap makes the server
+advertise `issue_refund` with an injected description. The server does the lying,
+not a stub in the client: a demo where the detector is fed a canned finding
+proves the detector prints, not that it detects. The action worker screens the
+catalogue at discovery and blanks a flagged description before the planner sees
+it (`TOOL_POISON_ACTION: redact`) — the description is removed, not the tool,
+because dropping it would let anyone who can edit a description disable any tool
+they like.
+
+### The rug pull
+
+The same server, serving a benign description until it is trusted and a different
+one afterwards. Tool names identical, schemas identical, tool list identical;
+nothing in a normal trace moves at all. The only thing that catches it is a
+fingerprint taken over descriptions and schemas and compared to one taken
+earlier — `mcp.tools.digest` on the `action_worker` span.
+
+`mcp.tools.baseline` says which comparison you are getting, and the difference
+matters: `pinned` means `MCP_TOOLS_DIGEST` is set in config and a server that was
+*already* poisoned at boot is caught on the first call; `first_seen` means the
+first catalogue this pod saw became its own baseline, which catches a change
+mid-life and is blind to a server that was compromised before the pod started. A
+restart forgets. The digest is logged on first sight, so pinning it is copy and
+paste.
+
+Flip `POISON_TOOL_DESCRIPTION` on a running stack and you have performed the rug
+pull: the digest stops matching, `mcp.tools.changed` goes true, and
+`o11yag.security.tool_catalogue_changed` fires with both digests in the record.
+
+**Nothing here blocks.** A worker that refuses to run because a description
+changed cannot tell a deploy from an attack, and hands anyone who can edit a
+description an outage. Detection produces a signal a human acts on; the control
+that holds regardless is the approval gate, which does not care who asked.
+
 ## Signals reference
 
 ### Metrics (`o11yag.*`)
@@ -291,6 +429,9 @@ time.
 | `o11yag.tool.calls` | counter | tool, outcome, approved | MCP tool calls |
 | `o11yag.retrieval.top_score` | histogram | collection | Best similarity score |
 | `o11yag.retrieval.hits` | histogram | collection | Chunks returned |
+| `o11yag.answer.quality` | counter | verdict, decided_by | Groundedness verdict on an answer that *was* given |
+| `o11yag.feedback` | counter | rating, intent, tenant | A human's verdict, arriving later on its own trace |
+| `o11yag.security.events` | counter | kind, action, source | Injection, tool poisoning or a changed tool catalogue |
 
 ### Span attributes beyond what OpenLLMetry emits
 
@@ -305,6 +446,11 @@ time.
 | `mcp.server` / `mcp.transport` / `mcp.tools.available` | action worker | The MCP hop |
 | `approval.required` / `.decision` / `.waited_ms` / `.decided_by` | action worker | The gate |
 | `rag.hits` / `.top_score` / `.doc_ids` / `.scores` / `.grounded` | knowledge worker | Retrieval quality, not just latency |
+| `quality.verdict` / `.decided_by` / `.reason` | knowledge worker | Was the answer supported by its extracts, who decided, and on what — `unsupported_number:60`, `low_overlap:0.12`, `declined`, `model_unparseable` |
+| `quality.judge.mode` / `.model` / `.tokens` | knowledge worker | Which judge ran, against which gateway alias, and what it cost |
+| `security.injection.detected` / `.kinds` / `.doc_ids` / `.action` | knowledge worker | A retrieved document carrying instructions, and whether it was quarantined |
+| `security.tool_poisoning.detected` / `.tools` / `.kinds` / `.action` | action worker | An MCP tool description carrying instructions |
+| `mcp.tools.digest` / `.baseline` / `.changed` | action worker | Fingerprint of the advertised catalogue, what it was compared against (`pinned` or `first_seen`), and whether it moved |
 
 The MCP SDK contributes spans of its own on top of these, from its
 `mcp-python-sdk` tracer and with no opt-in: `MCP send <method>` on the client
@@ -322,6 +468,11 @@ rather than ours, which matters when you allow-list attribute keys on the tenant
 | `o11yag.tool.called` | action worker | Tool, arguments, result, approval status |
 | `o11yag.tool.blocked` | action worker | A tool call the gate refused |
 | `o11yag.approval.requested` / `.decided` | approvals | Who decided, how long they took |
+| `o11yag.answer.withheld` | knowledge worker | An answer the judge rejected, kept in the record after being replaced |
+| `o11yag.feedback.received` | orchestrator | A human rating, and `subject_trace_id` — the trace being rated |
+| `o11yag.security.injection_detected` | knowledge worker | The document, the phrase that matched, and what was done |
+| `o11yag.security.tool_poisoned` | action worker | The tool, the phrase, and whether the description was redacted |
+| `o11yag.security.tool_catalogue_changed` | action worker | Both digests and the baseline they were compared against |
 | `o11yag.crm.refund_issued` | mcp-crm | The effect on the system of record |
 
 Every record carries `audit.trace_id` and `audit.span_id`, so an auditor pivots
@@ -385,12 +536,19 @@ work, and it is worth being exact about which of them you get for free:
 
 ## What this deliberately does not do
 
-- **No evaluation loop.** The reference architectures all draw one. This has
-  none. Drawing a box you didn't build is how a demo becomes a claim you can't
-  support — see gap 1 above.
-- **No security act.** Tool poisoning, indirect prompt injection through the RAG
-  corpus, rug-pulled tool definitions: all real, none built. The injection
-  document belongs in `knowledge-worker/kb.py` and is deliberately not there yet.
+- **No evaluation loop, still.** There is now a quality *signal* — the judge and
+  the feedback endpoint — and that is not the same thing. No offline evaluation
+  set, no regression suite, no golden answers, and nothing that routes a
+  thumbs-down back into retrieval, the prompt or a retraining queue. The
+  reference architectures draw the closed loop; this draws the half of it that
+  can be built honestly in a reference stack, and says which half that is.
+- **The security act detects; it does not prevent.** See its own section above.
+  The detectors are pattern matches over English imperatives and will miss an
+  injection in another language, split across two documents, or simply phrased
+  in a way the list does not cover. The durable controls are upstream (who can
+  write to the corpus, what is re-verified on ingest) and downstream (the
+  approval gate, which does not care who asked for the refund). Treat a hit as a
+  finding about the pipeline, not as a regex to tune.
 - **The approval gate auto-approves by default**, so loadgen can run unattended.
   With `AUTO_APPROVE=true` the gate proves nothing about governance — it is a
   timer wearing a reviewer's hat. Set it to `false`, port-forward the approvals
@@ -457,6 +615,16 @@ curl -X POST http://localhost:8000/chat -H 'Content-Type: application/json' \
        "text":"I want a refund for order ORD-1001, the headphones stopped working."}'
 ```
 
+**Rate an answer** (the human half of gap 1). `/chat` hands back the `trace_id`
+its own reply came from; feedback arrives later on a trace of its own and names
+that one, so a thumbs-down is openable rather than merely countable:
+```
+curl -X POST http://localhost:8000/feedback -H 'Content-Type: application/json' \
+  -d '{"ticket_id":"TK-1","rating":"down","intent":"question",
+       "trace_id":"<the trace_id /chat returned>",
+       "comment":"quoted a 60-day return window that does not exist"}'
+```
+
 **The approvals page**:
 ```
 kubectl port-forward service/o11yag-approvals 8004:8004 -n o11yag
@@ -499,3 +667,11 @@ believes it accepts.
 | A loop that runs out of budget | `MAX_STEPS: "1"` on the action worker ConfigMap |
 | An ungrounded answer | Ask something the KB has no policy for |
 | A blocked tool call | Deny an approval on the page |
+| An answer graded unsupported | Ask a question the KB half-covers — or force the plumbing with `JUDGE_MIN_OVERLAP: "0.9"`, which flags ordinary paraphrase |
+| That answer never reaching the customer | `JUDGE_ACTION: "withhold"` on the knowledge worker |
+| The judge off the critical path | `JUDGE_MODE: "heuristic"` — deterministic checks only, no second model call |
+| A prompt injection landing | `KB_POISON_DOC: "true"` **and** `INJECTION_ACTION: "observe"`, then ask about a faulty item |
+| The same injection stopped | `KB_POISON_DOC: "true"` alone — quarantine is the default |
+| A poisoned tool description | `POISON_TOOL_DESCRIPTION: "true"` on the **mcp-crm** ConfigMap |
+| A rug pull | Flip that same flag while the action worker is running |
+| A thumbs-down | `POST /feedback` — see below |

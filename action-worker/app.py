@@ -42,8 +42,16 @@ import approvals   # noqa: E402
 import llm         # noqa: E402
 import mcp_client  # noqa: E402
 import planner     # noqa: E402
+import security    # noqa: E402
 
 tracer = trace.get_tracer("o11yag")
+
+# The catalogue this pod first saw, when nothing is pinned in config. Per
+# process, deliberately: it is a weaker control than a pinned digest and the
+# telemetry says which one is in force (`mcp.tools.baseline`) so the two are
+# never read as the same claim. A restart forgets, which is exactly the
+# limitation — a server poisoned before the pod booted looks original.
+_first_seen_digest = None
 
 SUMMARY = ("Tell the customer what you did, in two sentences, based only on the "
            "tool results below. Do not promise anything the results don't show.")
@@ -88,6 +96,77 @@ def invoke(name: str, args: dict, ticket_id: str, customer_id: str):
     return result
 
 
+def _screen_catalogue(tools, span, ticket_id: str):
+    """Check what the server just advertised, before any of it reaches the model.
+
+    Two different attacks, one place to catch both:
+
+      tool poisoning  an instruction written into a tool's description. It goes
+                      into the planner's system prompt as capability
+                      documentation — the part of the prompt the agent is built
+                      to act on — and if it works, the resulting call is
+                      well-formed, in-schema and attributed to the model.
+                      `validate_args` passes it, because the arguments are
+                      genuinely valid; it was the intent that was supplied by an
+                      attacker, and no schema check can see that.
+
+      rug pull        the description changing after the server earned trust.
+                      Names identical, schemas identical, tool list identical.
+                      Nothing in a normal trace moves, which is why the only
+                      thing that catches it is a fingerprint taken over the
+                      descriptions and compared to one taken earlier.
+
+    Neither is blocked here, and that is a decision rather than an omission: a
+    worker that refuses to run because a description changed cannot tell a
+    deploy from an attack, and would hand anyone who can edit a description an
+    outage. The controls that hold regardless are downstream — the approval gate
+    does not care who asked for the refund — so this reports, redacts, and lets
+    the loop continue under signals a human can act on.
+    """
+    digest = security.catalogue_digest(tools)
+    span.set_attribute("mcp.tools.digest", digest)
+
+    global _first_seen_digest
+    if Config.MCP_TOOLS_DIGEST:
+        baseline, expected = "pinned", Config.MCP_TOOLS_DIGEST
+    else:
+        baseline = "first_seen"
+        if _first_seen_digest is None:
+            _first_seen_digest = digest
+            app.logger.info("MCP tool catalogue digest %s (unpinned; "
+                            "set MCP_TOOLS_DIGEST to this to pin it)", digest)
+        expected = _first_seen_digest
+
+    span.set_attribute("mcp.tools.baseline", baseline)
+    changed = digest != expected
+    span.set_attribute("mcp.tools.changed", changed)
+    if changed:
+        span.set_attribute("mcp.tools.digest.expected", expected)
+        o11y.security_event(kind="tool_catalogue_changed", action="observed",
+                            source="mcp_server")
+        o11y.audit("o11yag.security.tool_catalogue_changed",
+                   ticket_id=ticket_id, server="o11yag-crm", baseline=baseline,
+                   digest=digest, expected=expected, tools=[t[0] for t in tools])
+
+    detections = security.scan_tools(tools)
+    span.set_attribute("security.tool_poisoning.detected", bool(detections))
+    if not detections:
+        return tools
+
+    redact = Config.TOOL_POISON_ACTION == "redact"
+    action = "redacted" if redact else "observed"
+    span.set_attribute("security.tool_poisoning.action", action)
+    span.set_attribute("security.tool_poisoning.tools", [d["tool"] for d in detections])
+    span.set_attribute("security.tool_poisoning.kinds", sorted({d["kind"] for d in detections}))
+    for d in detections:
+        o11y.security_event(kind="tool_poisoning", action=action, source="mcp_server")
+        o11y.audit("o11yag.security.tool_poisoned", ticket_id=ticket_id,
+                   server="o11yag-crm", tool=d["tool"], kind=d["kind"],
+                   match=d["match"], action=action)
+
+    return security.redact_tools(tools, detections) if redact else tools
+
+
 @agent(name="action_worker")
 def act(body: dict):
     text = str(body.get("text", ""))
@@ -102,6 +181,7 @@ def act(body: dict):
     try:
         tools = mcp_client.list_tools()
         span.set_attribute("mcp.tools.available", [t[0] for t in tools])
+        tools = _screen_catalogue(tools, span, ticket_id)
     except Exception as exc:
         app.logger.exception("MCP server unreachable")
         span.set_attribute("error.kind", "mcp_unavailable")

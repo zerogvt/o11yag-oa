@@ -73,6 +73,17 @@ those are the ones a person actually asks about:
   gate actually fires, which needs a refund above `AUTO_APPROVE_MAX_EUR` — send one
   for `ORD-1004` (€430). Add the tile once there is data behind it rather than
   shipping an empty one.
+- **The gap 1 and gap 2 series have no tiles yet.** `o11yag.answer.quality`,
+  `o11yag.feedback` and `o11yag.security.events` were added after this dashboard
+  was validated against a live tenant, and every query in this file was written
+  against real data on purpose. `o11yag.security.events` is the one to be most
+  careful with: it is empty unless an attack is switched on, so an empty tile is
+  the healthy case and reads identically to a broken one. Give it a threshold and
+  a sentence of tile text before shipping it, or leave it out.
+- **`o11yag.answer.quality` deserves a split, not a total.** The useful chart is
+  verdict by `decided_by` — a rising `unsupported` count decided by `heuristic`
+  is the model inventing figures, and the same count decided by `model` is a
+  judge that may simply be wrong. Summed into one number they cancel.
 - **No audit-record tiles.** Tool arguments, approval decisions and conversation
   text are emitted as OTLP **logs**, not metrics, and need the `logs.ingest` scope
   on the Dynatrace token. Without it the Collector accepts them and Dynatrace

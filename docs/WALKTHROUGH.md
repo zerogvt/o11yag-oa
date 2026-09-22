@@ -3,6 +3,10 @@
 A guided read of this codebase for someone who knows observability but is new to
 agentic architecture. Start here, then read the code in the order below.
 
+> Once this makes sense, [`UPDATE-GAPS-1-2.md`](UPDATE-GAPS-1-2.md) walks the
+> parts added later: the answer judge, the feedback endpoint, and the detectors
+> for prompt injection, tool poisoning and rug-pulled tool definitions.
+
 > Function names are used as anchors rather than line numbers, because line
 > numbers rot. `grep -n "def <name>" <file>` will find any of them.
 
@@ -258,6 +262,9 @@ allow-listed on the tenant:
 | `step.fallback_reason` | *Why* the model was overruled |
 | `gen_ai.tool.call.arguments` | What the model actually proposed |
 | `rag.top_score` | Whether retrieval gave the answer anything to stand on |
+| `quality.verdict` / `.decided_by` | Whether the answer was supported by its extracts, and who decided |
+| `security.injection.detected` | A retrieved document that carried instructions |
+| `mcp.tools.digest` / `.changed` | The tool catalogue's fingerprint, and whether it moved |
 
 To see the governance path — which this stack has still never executed — set
 `PLANNER_MODE: "rules"` on the action-worker ConfigMap and restart it. Then a
@@ -278,9 +285,13 @@ Each of these cost real debugging time and is documented where it bites:
 - **`traceloop-sdk` imports `httpx` without declaring it**, and nothing else in a
   modern LLM stack still pulls httpx in (`openai` 3.x and `mcp` 2.x both moved to
   `httpx2`). Every service lists it explicitly.
-- **Trace context does not cross the MCP hop by itself**, because the MCP SDK
-  uses `httpx2` and the OTel httpx instrumentation does not see it. Injected by
-  hand in `mcp_client.py`.
+- **Trace context crosses the MCP hop in the JSON-RPC envelope, not the HTTP
+  headers.** The SDK injects it into `_meta` (SEP-414) and the server's own
+  middleware reads it back, so the tool call is parented for free — over stdio
+  too. What is *not* free is the HTTP layer underneath: the MCP SDK speaks
+  `httpx2` and the OTel httpx instrumentation does not see it, so without the
+  hand-injection in `mcp_client.py` the `POST /mcp` and `DELETE /mcp` spans root
+  traces of their own.
 - **The MCP server validates the `Host` header** and auto-allows only localhost,
   so in Kubernetes everything returns 421 until the Service name is allow-listed.
 - **`startupProbe.timeoutSeconds` defaults to one second**, which is not enough
@@ -296,6 +307,11 @@ backend's ingest rules, not the code.
 ## 7. Where to go next
 
 The main [README](../README.md) covers the four observability gaps, the full
-signals reference, and what the project deliberately does not do. Gap 1 — silent
-semantic failure — is the one still open, and the most valuable thing left to
-build.
+signals reference, and what the project deliberately does not do.
+
+Gap 1 — silent semantic failure — now has a signal rather than a hole:
+[`UPDATE-GAPS-1-2.md`](UPDATE-GAPS-1-2.md) walks the judge that grades an answer
+against the extracts it was given, the feedback endpoint that is the only input
+the stack cannot generate about itself, and the security act — indirect prompt
+injection through the corpus, tool poisoning, and the rug pull. It also says
+which parts of all that have been verified and which have only been written.

@@ -42,5 +42,16 @@ class Config:
     # Escape hatch. If you turn this off, say why in your commit message.
     MCP_DNS_REBINDING_PROTECTION = _bool("MCP_DNS_REBINDING_PROTECTION", True)
 
+    # --- gap 2: the security act, server side ---
+    # Append an instruction to the issue_refund description, so the action
+    # worker's tool-catalogue screening has something real to catch. Off by
+    # default, and it is the *server* that lies here rather than the client that
+    # pretends to be lied to: a demo where the detector is fed a canned finding
+    # proves the detector prints, not that it detects.
+    #
+    # Turning it on after the worker has run is the rug pull — the digest the
+    # worker recorded no longer matches, which is the point of recording it.
+    POISON_TOOL_DESCRIPTION = _bool("POISON_TOOL_DESCRIPTION", False)
+
     OTEL_ENABLED = _bool("OTEL_ENABLED", False)
     OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")

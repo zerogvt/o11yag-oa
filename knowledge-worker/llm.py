@@ -15,9 +15,14 @@ def embed(text: str):
     return client.embeddings.create(model=Config.EMBED_MODEL, input=text).data[0].embedding
 
 
-def chat(messages, max_tokens: int = 200, temperature: float = 0.2):
-    """Return the raw response — callers want usage as well as the text."""
+def chat(messages, max_tokens: int = 200, temperature: float = 0.2, model: str = None):
+    """Return the raw response — callers want usage as well as the text.
+
+    `model` is a gateway alias, not a provider model name, and defaults to the
+    service's own. The judge passes its own alias so that grading and answering
+    can be pointed at different models from the gateway config alone.
+    """
     return client.chat.completions.create(
-        model=Config.CHAT_MODEL, messages=messages,
+        model=model or Config.CHAT_MODEL, messages=messages,
         max_tokens=max_tokens, temperature=temperature,
     )

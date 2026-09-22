@@ -201,6 +201,61 @@ def retrieval_scored(collection: str, top_score: float, hits: int):
         hits, {"collection": collection})
 
 
+def answer_judged(verdict: str, decided_by: str):
+    """The quality verdict on an answer that was actually given.
+
+    This is the series that closes the half of gap 1 the retrieval floor cannot:
+    `o11yag.retrieval.top_score` tells you the model was handed the right
+    document, and says nothing about whether the answer it then wrote is
+    supported by it. A confidently wrong answer off a correct extract scores
+    perfectly on every other signal in this stack.
+
+    `decided_by` is not decoration. A judge is itself a model, and on a small
+    local one its verdict is worth little — so the deterministic check is a
+    first-class decider rather than a fallback nobody can see. Splitting the
+    series by who decided keeps an honest judge and a rubber stamp apart in the
+    same chart, and makes "how often does the judge model fail to produce a
+    usable verdict" a question you can answer.
+    """
+    _instrument("counter", "o11yag.answer.quality", "1", "Answers graded for groundedness").add(
+        1, {"verdict": verdict, "decided_by": decided_by})
+
+
+def feedback_received(rating: str, intent: str, tenant: str):
+    """A human's verdict on an answer, after the fact.
+
+    The judge is an opinion the stack holds about itself. This is the only
+    signal here that comes from outside it, which makes it the one that can
+    contradict the rest — a stream of thumbs-down against a healthy
+    `o11yag.answer.quality` is the judge being wrong, and there is no internal
+    signal that could have told you.
+
+    Arrives on its own trace, long after the ticket closed. `o11yag.feedback`
+    is therefore joined to the ticket by id, never by trace context; the audit
+    record carries the graded trace id so a pivot is still one query.
+    """
+    _instrument("counter", "o11yag.feedback", "1", "Human verdicts on an answer").add(
+        1, {"rating": rating, "intent": intent, "tenant": tenant})
+
+
+def security_event(kind: str, action: str, source: str):
+    """Adversarial content found in something the agent was about to trust.
+
+    Deliberately one series for the whole security act rather than one per
+    attack: the useful alert is "the agent was fed an instruction by something
+    that should only have supplied data", and the kind dimension says which
+    door it came through (`prompt_injection`, `tool_poisoning`,
+    `tool_catalogue_changed`).
+
+    `action` is what was *done* about it — `blocked`, `quarantined`,
+    `observed`. A detector that only observes is worth having and worth being
+    honest about, and the two cases must not be summed into one number.
+    """
+    _instrument("counter", "o11yag.security.events", "1",
+                "Adversarial content detected in agent input").add(
+        1, {"kind": kind, "action": action, "source": source})
+
+
 # --------------------------------------------------------------------------
 # Audit records
 # --------------------------------------------------------------------------

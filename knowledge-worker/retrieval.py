@@ -23,24 +23,38 @@ _qdrant = QdrantClient(url=Config.QDRANT_URL, timeout=30)
 
 
 def ensure_seeded():
-    """Create and fill the collection if it isn't there.
+    """Create and fill the collection if it isn't there, or if the corpus grew.
 
     Idempotent by design: every gunicorn worker runs this on boot, and so does
     every pod restart. Two workers racing on first boot would both try to create
     the collection; the loser's error is caught and the data is identical either
-    way.
+    way. Point ids are the corpus index, so a re-upsert overwrites rather than
+    duplicates.
+
+    The size check is what makes KB_POISON_DOC usable. Qdrant keeps its volume
+    across a redeploy, so "skip if the collection exists" would leave the
+    injection demo switched on in config and absent from the data — the flag
+    would appear not to work, on a stack whose whole point is that silent
+    mismatches are what get you. Comparing the count is cheap and catches the
+    document being added or removed in either direction.
     """
     try:
+        corpus = kb.docs()
         if _qdrant.collection_exists(Config.COLLECTION):
-            return
-        log.info("seeding collection %s", Config.COLLECTION)
-        _qdrant.create_collection(
-            collection_name=Config.COLLECTION,
-            vectors_config=VectorParams(size=Config.EMBED_DIM, distance=Distance.COSINE),
-        )
+            existing = _qdrant.count(Config.COLLECTION, exact=True).count
+            if existing == len(corpus):
+                return
+            log.info("corpus changed (%d stored, %d configured) — reseeding",
+                     existing, len(corpus))
+        else:
+            log.info("seeding collection %s", Config.COLLECTION)
+            _qdrant.create_collection(
+                collection_name=Config.COLLECTION,
+                vectors_config=VectorParams(size=Config.EMBED_DIM, distance=Distance.COSINE),
+            )
         points = [
             PointStruct(id=i, vector=llm.embed(text), payload={"doc_id": doc_id, "text": text})
-            for i, (doc_id, text) in enumerate(kb.DOCS)
+            for i, (doc_id, text) in enumerate(corpus)
         ]
         _qdrant.upsert(collection_name=Config.COLLECTION, points=points)
         log.info("seeded %d documents", len(points))
