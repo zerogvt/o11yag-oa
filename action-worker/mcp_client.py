@@ -1,21 +1,28 @@
 """MCP client for the CRM server, over Streamable HTTP.
 
-TRACE CONTEXT IS INJECTED BY HAND HERE, and that is the interesting part.
+TRACE CONTEXT TRAVELS BY TWO ROUTES HERE, and the difference between them is the
+interesting part.
 
-The obvious approach — add opentelemetry-instrumentation-httpx and let it
-propagate — does not work with this SDK. MCP 2.x makes its HTTP calls through
-`httpx2`, a different package from `httpx`, so the httpx instrumentation never
-sees them. The symptom would be quietly wrong rather than broken: every MCP call
-would still succeed, the server would still be instrumented, and you would get
-two unrelated traces per ticket with nothing to say why.
+The MCP layer propagates itself, and costs us nothing. The SDK's dispatcher opens
+a CLIENT span per outbound request — these are the `MCP send <method>` spans in
+the waterfall — and injects the W3C context into that request's JSON-RPC `_meta`
+field (SEP-414). The server's own OpenTelemetryMiddleware, which ships enabled,
+reads it back. Because the carrier is `_meta` and not a header, this works over
+stdio as well; trace continuity across MCP is not a property of the transport.
 
-So the client below carries an event hook that writes the current W3C context
-onto every outgoing request. The MCP server reads it back via its ASGI
-middleware, and the tool call lands in the same trace as the ticket.
+The HTTP layer underneath does not propagate itself. The obvious approach — add
+opentelemetry-instrumentation-httpx and let it handle it — does nothing with this
+SDK, because MCP 2.x makes its HTTP calls through `httpx2`, a different package
+from `httpx`, so the httpx instrumentation never sees them. Hence the event hook
+below, which writes the current W3C context onto every outgoing request for the
+MCP server's ASGI middleware to pick up.
 
-None of this is needed for a stdio MCP server — because none of it is possible
-there. stdio has no headers; propagation has to go in the JSON-RPC `_meta` field
-instead, which both ends must agree to implement.
+Be exact about what that second route buys, because it is narrower than it looks:
+the tool call itself would land in the ticket's trace either way, over `_meta`.
+The hook is what keeps the transport spans — `POST /mcp`, and the session's
+`DELETE /mcp` — inside that trace instead of each rooting a trace of its own. The
+symptom of dropping it is quietly wrong rather than broken: every call succeeds
+and nothing reports an error.
 
 SIMPLIFICATION: a session is opened and torn down per call. A real agent holds
 one session for a whole conversation, so this adds an initialize round trip to

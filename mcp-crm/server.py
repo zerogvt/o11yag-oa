@@ -5,12 +5,15 @@ allowed to touch, exposed as MCP tools rather than as a bespoke HTTP API.
 
 Two things here are the observability point of the whole service:
 
-1. The ASGI middleware. Without it the MCP call arrives with a traceparent
-   header nobody reads, and the server's work becomes a second, unrelated trace.
-   With it, orchestrator -> action worker -> MCP server is one waterfall. The
-   client side has to cooperate: see the long note in action-worker/mcp_client.py
-   about why the trace header is injected by hand there. A stdio MCP server has
-   no header at all and would need the id smuggled into the JSON-RPC _meta field.
+1. The ASGI middleware, and precisely what is left for it to do. The MCP layer
+   already parents itself: the SDK's own OpenTelemetryMiddleware ships enabled
+   and reads the W3C context out of the JSON-RPC _meta field the client put it
+   in, over any transport, stdio included. What that leaves unparented is the
+   HTTP request carrying it, so without the ASGI middleware added below the
+   inbound POST /mcp arrives with a traceparent header nobody reads and roots a
+   trace of its own. With it, orchestrator -> action worker -> MCP server is one
+   waterfall down to the transport. The client side has to cooperate: see the
+   long note in action-worker/mcp_client.py.
 
 2. issue_refund writes an audit record. A tool that changes a system of record is
    a business event, and the span alone is the wrong home for it — spans are
@@ -121,6 +124,8 @@ def build_app():
              ", ".join(Config.MCP_ALLOWED_HOSTS) or "<none>",
              "on" if Config.MCP_DNS_REBINDING_PROTECTION else "OFF")
     if Config.OTEL_ENABLED:
+        # Not the MCP SDK's same-named OpenTelemetryMiddleware, which is already
+        # installed on the server by default and works a layer above this one.
         from opentelemetry.instrumentation.asgi import OpenTelemetryMiddleware
 
         app.add_middleware(OpenTelemetryMiddleware)

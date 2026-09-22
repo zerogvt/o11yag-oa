@@ -264,9 +264,10 @@ by every downstream span.
 
 Every MCP call produces a span (`gen_ai.tool.name`, `mcp.server`,
 `mcp.transport`, arguments), a metric (`o11yag.tool.calls` by tool / outcome /
-approval status) and an audit record. The MCP server is instrumented too, and the
-client injects trace context by hand, so the call is one trace end to end rather
-than two unrelated ones — see *Trace context* below for why that is not automatic.
+approval status) and an audit record. The MCP server is instrumented too, and
+the SDK carries trace context in the JSON-RPC `_meta` field, so the call is one
+trace end to end. The HTTP hop underneath it is the part that needs help — see
+*Trace context* below for which half is free and which is not.
 
 ### Bonus: the approval gate is not invisible
 
@@ -305,6 +306,12 @@ time.
 | `approval.required` / `.decision` / `.waited_ms` / `.decided_by` | action worker | The gate |
 | `rag.hits` / `.top_score` / `.doc_ids` / `.scores` / `.grounded` | knowledge worker | Retrieval quality, not just latency |
 
+The MCP SDK contributes spans of its own on top of these, from its
+`mcp-python-sdk` tracer and with no opt-in: `MCP send <method>` on the client
+side (`mcp.method.name`, `jsonrpc.request.id`) and a matching server span
+carrying `gen_ai.operation.name` and `gen_ai.tool.name`. They are the SDK's
+rather than ours, which matters when you allow-list attribute keys on the tenant.
+
 ### Audit records (OTLP logs, `audit.*`)
 
 | Event type | Written by | Carries |
@@ -342,30 +349,39 @@ for what each tile is for and which metrics deliberately have no tile yet.
 ## Trace context
 
 The stack is one trace from ticket to system of record. Three things make that
-work, none of them automatic:
+work, and it is worth being exact about which of them you get for free:
 
 - **OpenLLMetry does not instrument HTTP.** `o11y.py` adds the Flask, requests
   and httpx instrumentations separately. Without them every service hop starts a
   new trace. Be precise about what each buys, because this stack is mostly *not*
   on httpx: `requests` covers the service-to-service hops, `httpx` covers
   `qdrant-client` and nothing else, and Flask covers the inbound span.
-- **The MCP hop is propagated by hand**, and this is the part worth knowing
-  about. The obvious approach — add `opentelemetry-instrumentation-httpx` and let
-  it propagate — silently does nothing here, because **MCP 2.x makes its HTTP
-  calls through `httpx2`, a different package from `httpx`**. The same is true of
-  the OpenAI SDK from 3.x on, so the httpx instrumentation does not cover the LLM
-  calls either — those become spans because Traceloop wraps the OpenAI *client*,
-  a level above the transport. The failure mode is
-  not an error: every call succeeds, the server is instrumented, and you simply
-  get two unrelated traces per ticket. So `action-worker/mcp_client.py` hands the
-  transport its own `httpx2` client with an event hook that injects the W3C
-  context on every request.
-- **The MCP server has ASGI middleware** to read that context back. Without it
-  the server's work becomes a second trace regardless of what the client sent.
-- **None of this is available over stdio.** stdio has no headers, so propagation
-  has to go in the JSON-RPC `_meta` field and both ends have to agree to
-  implement it. Trace continuity across MCP is a property of the HTTP transport,
-  not of MCP.
+- **The MCP hop propagates itself, inside the JSON-RPC envelope.** This is free,
+  and it is the part most write-ups (including an earlier version of this one)
+  get wrong. The SDK's client dispatcher opens a CLIENT span per outbound
+  request — the `MCP send <method>` spans in the waterfall, named after the
+  method plus the tool where the params carry one, in
+  `mcp/shared/jsonrpc_dispatcher.py` — and writes the W3C context into that
+  request's `_meta` field on the way out (SEP-414). The server end reads it back
+  in `OpenTelemetryMiddleware`, which `mcp.server.lowlevel.server` installs by
+  default and which also sets `gen_ai.operation.name` and `gen_ai.tool.name` on
+  `tools/call`. Nothing here configures any of it; it arrives with `mcp` 2.x.
+  Because the carrier is `_meta` rather than a header, **it holds over stdio
+  too** — trace continuity across MCP is no longer a property of the transport.
+- **The HTTP layer underneath it does not propagate itself.** The obvious fix —
+  add `opentelemetry-instrumentation-httpx` and let it propagate — silently does
+  nothing here, because **MCP 2.x makes its HTTP calls through `httpx2`, a
+  different package from `httpx`**. The same is true of the OpenAI SDK from 3.x
+  on, so the httpx instrumentation does not cover the LLM calls either — those
+  become spans because Traceloop wraps the OpenAI *client*, a level above the
+  transport. So `action-worker/mcp_client.py` hands the transport its own
+  `httpx2` client with an event hook that injects the W3C context on every
+  request, and the MCP server adds ASGI middleware to read that header back.
+  Be honest about what that second route buys: the tool call itself lands in the
+  right trace either way, over `_meta`. The hand-injection is what keeps the
+  transport spans — `POST /mcp`, and the session's `DELETE /mcp` — inside the
+  ticket's trace instead of each rooting one of its own. The failure mode is not
+  an error: every call still succeeds and nothing reports a problem.
 
 ## What this deliberately does not do
 
