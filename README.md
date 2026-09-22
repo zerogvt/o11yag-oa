@@ -48,18 +48,19 @@ front of anything consequential.
                             ┌─────────┐
                             │ loadgen │  a ticket every 20s
                             └────┬────┘
-                                 │ POST /chat
-                                 ▼
-                      ┌──────────────────────┐
+                                 │ POST /chat       human ──┐
+                                 ▼                          │ POST /feedback
+                      ┌──────────────────────┐◀─────────────┘
              ┌────────│     orchestrator     │────────┐
              │        └──────────┬───────────┘        │
     delegate │                   │ chat               │ delegate
              ▼                   │                    ▼
  ┌──────────────────────┐        │     ┌──────────────────────┐
  │   knowledge-worker   │        │     │     action-worker    │
- │         (RAG)        │        │     │     (agent loop)     │
+ │  retrieve → screen   │        │     │   screen catalogue   │
+ │  → answer → judge    │        │     │   → agent loop       │
  └───┬──────────────┬───┘        │     └──┬─────────┬──────┬──┘
-     │ retrieve     │ chat       │   chat │   MCP   │      │ approve?
+     │ retrieve     │ chat ×2    │   chat │   MCP   │      │ approve?
      ▼              │  + embed   │        │         ▼      │
 ┌───────────┐       │            │        │  ┌───────────┐ │
 │   qdrant  │       └──────┐     │   ┌────┘  │  mcp-crm  │ │
@@ -91,6 +92,17 @@ leans on, and that is the point rather than an artefact of the drawing: **every
 chat and embedding call goes through `litellm`**, so no service holds a provider
 name or ever reaches Ollama directly, and **every instrumented service exports
 through one Collector**, so swapping the backend is a Collector change.
+
+The stages written inside the two worker boxes are **not pods**, and that is
+worth reading twice, because it is where half of this project's signal now comes
+from. `screen` and `judge` are code sitting between an input and a prompt, or
+between a prompt and the reply — nothing to deploy, nothing on the network to
+point at, and no box of their own to draw. The judge is a second call through the
+same gateway under its own alias (`support-judge`), which is why a question
+ticket now costs two model calls rather than one. `POST /feedback` is likewise
+just another endpoint on the orchestrator; it earns an arrow because the *human*
+on the end of it is the only input in this diagram the stack cannot generate
+about itself.
 
 MCP wraps the **systems of record only**. The knowledge worker talks to Qdrant
 directly, because in practice you don't MCP-wrap your own vector store — you
