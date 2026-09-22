@@ -13,6 +13,11 @@
 # Token scopes needed: Ingest metrics, Ingest OpenTelemetry traces, Ingest logs.
 # (Ingest logs carries the audit records. Without it the Collector accepts them
 # and Dynatrace rejects them, which is silent unless you read the debug output.)
+#
+# Changing the token means restarting this Deployment: the value below is read
+# from the Secret at container start, so rewriting the Secret does not reach a
+# running pod and the previous token stays in force. build_deploy.sh does the
+# restart when it rewrites the Secret.
 apiVersion: v1
 kind: ConfigMap
 metadata:

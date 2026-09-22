@@ -39,6 +39,11 @@ data:
   # that should not have been attempted; this catches the ones grounded in the
   # right document and wrong anyway.
   #   off | heuristic | model   (model = deterministic checks, then a judge call)
+  #
+  # Measured on this stack: over 10 graded answers the judge model returned 0
+  # usable verdicts for 2,353 tokens and 1,462ms p50 of added latency. Set this
+  # to "heuristic" to stop paying for that; leave it on "model" to keep the
+  # failure visible in quality.decided_by, which is where it was found.
   JUDGE_MODE: "model"
   # Its own gateway alias so the judge can be swapped for a capable model
   # without touching code. Today it resolves to the same qwen:0.5b as

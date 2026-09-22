@@ -317,8 +317,12 @@ with both digests, and `o11yag.security.tool_catalogue_changed` fires.
 
 Stated plainly, because this is the part a reader would otherwise assume:
 
-- The judge's **model** path has never been asked for a verdict by a real model.
-  Only the deterministic checks have been exercised.
+- ~~The judge's **model** path has never been asked for a verdict by a real
+  model.~~ **Now run, and it fails.** 10 attempts against a live `qwen:0.5b`
+  produced 0 usable verdicts — 4 `model_no_verdict`, 2 `model_unparseable`, the
+  rest settled by the heuristic first — for 2,353 tokens and 1,462 ms p50 of
+  added latency per ticket. The plumbing works; the judge does not. See the
+  README's gap 1 section.
 - The reseed that makes `KB_POISON_DOC` take effect has never run against a live
   Qdrant.
 - No agent has been observed actually **complying** with an injection it was fed.

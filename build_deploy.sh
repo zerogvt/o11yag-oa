@@ -26,6 +26,7 @@ echo " * * * Creating Dynatrace secret * * * "
 # On a redeploy the secret usually survived (stop.sh removes Deployments, not
 # the namespace or this imperatively-created secret), so don't prompt for a
 # token we already have. Setting DT_API_TOKEN/DT_TENANT still forces a rewrite.
+SECRET_WRITTEN=0
 if [ -z "$DT_API_TOKEN" ] && kubectl get secret o11yag-collector -n o11yag >/dev/null 2>&1; then
   echo "Secret o11yag-collector already exists, keeping it"
 else
@@ -50,6 +51,7 @@ else
     --from-literal=DT_API_TOKEN="$DT_API_TOKEN" \
     --from-literal=DT_OTLP_ENDPOINT=https://$DT_TENANT.live.dynatrace.com/api/v2/otlp \
     -n o11yag --dry-run=client -o yaml | kubectl apply -f -
+  SECRET_WRITTEN=1
 fi
 
 # Stateful/pulled-image infrastructure first: the services below all fail their
@@ -61,6 +63,32 @@ kubectl apply -f redis/k8s/o11yag-redis.yaml
 kubectl apply -f qdrant/k8s/o11yag-qdrant.yaml
 kubectl apply -f ollama/k8s/o11yag-ollama.yaml
 kubectl apply -f litellm/k8s/o11yag-litellm.yaml
+
+# Roll a Deployment whose ConfigMap changed but whose own spec did not.
+#
+# `kubectl apply` on a manifest holding both a ConfigMap and a Deployment updates
+# the ConfigMap and leaves the Deployment alone, because the Deployment spec is
+# byte-identical. The pod keeps running with the config it booted on. For the
+# services this never shows, since every deploy gives them a fresh image tag —
+# but LiteLLM and the Collector are not rebuilt, and both read their config file
+# exactly once, at startup.
+#
+# It bit us for real: a new model alias was added to LiteLLM's config, applied,
+# and every call for it came back `400 Invalid model name` — the alias present in
+# the ConfigMap and absent from the running proxy. Nothing in the deploy output
+# suggested the config had not taken.
+#
+# The annotation is a checksum of the manifest, so an unchanged file patches the
+# same value and Kubernetes does nothing. Only a real change rolls the pod.
+roll_on_config_change() {
+  local name="$1" file="$2"
+  local sum
+  sum="$(sha256sum "$file" | cut -c1-12)"
+  kubectl patch deployment "$name" -n o11yag --type=strategic \
+    -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"o11yag.config/checksum\":\"${sum}\"}}}}}" \
+    >/dev/null
+}
+roll_on_config_change o11yag-litellm litellm/k8s/o11yag-litellm.yaml
 
 if [ "$BUILD" -eq 1 ]; then
   echo "* * * Building * * *"
@@ -113,6 +141,22 @@ done
 
 echo "* * * Deploying OTEL collector * * *"
 kubectl apply -f collector/k8s/o11yag-collector.yaml
+roll_on_config_change o11yag-otel-collector collector/k8s/o11yag-collector.yaml
+
+# A rewritten Secret does not reach a running pod. Env vars are injected from it
+# at container start, so the Collector goes on using the token it booted with and
+# `kubectl apply` above changes nothing when the manifest itself is unchanged.
+#
+# The failure this produces is the nastiest kind: you rotate a token, fix its
+# scopes, redeploy, and the exact same 403 keeps coming — which reads as the new
+# token being wrong rather than as the new token never having been loaded. It
+# cost a debugging session once. Hence the restart, only when the Secret actually
+# changed, so an ordinary redeploy does not churn the Collector.
+if [ "$SECRET_WRITTEN" -eq 1 ]; then
+  echo "* * * Secret changed - restarting the collector so it picks up the token * * *"
+  kubectl rollout restart deployment/o11yag-otel-collector -n o11yag
+  kubectl rollout status deployment/o11yag-otel-collector -n o11yag --timeout=120s
+fi
 
 echo
 echo "Done. Watch it come up with:   kubectl get pods -n o11yag -w"

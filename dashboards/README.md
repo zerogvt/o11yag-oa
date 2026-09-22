@@ -67,23 +67,65 @@ those are the ones a person actually asks about:
 - **Retrieval quality**, not retrieval latency. A vector search that takes 9ms and
   returns nothing relevant looks healthy until you record the score.
 
+## The empty Error rate tile, and why
+
+Worth writing down, because it cost real time and the failure is silent.
+
+The tile used to compute its percentage from two series in one block:
+
+```
+timeseries {
+  all = sum(o11yag.tasks),
+  err = sum(o11yag.tasks, filter: {outcome == "error"})
+}
+| fieldsAdd error_rate = arraySum(err) * 100.0 / arraySum(all)
+```
+
+When the timeframe contains no error tickets, `err` matches nothing — and a
+`timeseries` block in which **one** aggregation matches nothing returns **no rows
+at all**, dropping `all` with it. Not a null percentage, not zero: an empty
+result. So the tile went blank precisely when the system was healthiest, on a
+dashboard whose neighbouring tiles were full of data. `default: 0` does not help;
+the row is gone before the default would apply.
+
+Verified against the tenant: over a 9-hour window with 320 tickets and no errors,
+the block returned zero records while `timeseries all = sum(o11yag.tasks)` alone
+returned 320.
+
+The fix is to never filter a second series — group on the dimension instead, so
+every row comes from data that exists, and do the arithmetic afterwards:
+
+```
+timeseries tickets = sum(o11yag.tasks), by: {outcome}
+| fieldsAdd n = arraySum(tickets)
+| summarize all = sum(n), err = sum(if(outcome == "error", n, else: 0))
+| fieldsAdd error_rate = err * 100.0 / all
+| fields error_rate
+```
+
+Same window, same data: `0`. Which is the answer, and is what a healthy system
+should display.
+
 ## Known gaps
 
-- **`o11yag.approval.wait` has no tile.** The metric only exists once the approval
-  gate actually fires, which needs a refund above `AUTO_APPROVE_MAX_EUR` — send one
-  for `ORD-1004` (€430). Add the tile once there is data behind it rather than
-  shipping an empty one.
-- **The gap 1 and gap 2 series have no tiles yet.** `o11yag.answer.quality`,
-  `o11yag.feedback` and `o11yag.security.events` were added after this dashboard
-  was validated against a live tenant, and every query in this file was written
-  against real data on purpose. `o11yag.security.events` is the one to be most
-  careful with: it is empty unless an attack is switched on, so an empty tile is
-  the healthy case and reads identically to a broken one. Give it a threshold and
-  a sentence of tile text before shipping it, or leave it out.
-- **`o11yag.answer.quality` deserves a split, not a total.** The useful chart is
-  verdict by `decided_by` — a rising `unsupported` count decided by `heuristic`
-  is the model inventing figures, and the same count decided by `model` is a
-  judge that may simply be wrong. Summed into one number they cancel.
+- **Three tiles are empty in the healthy case**, and an empty tile is
+  indistinguishable from a broken one. Human feedback is empty because nothing
+  sends feedback automatically; Security detections is empty because every attack
+  is off by default; Answer quality is empty when no ticket routed to `question`.
+  Each tile's description says so, and the footer tile says to check **Tickets
+  handled** first. That is the only mitigation short of a threshold, and it is
+  worth restating whenever one of these is added to an alert.
+- **`o11yag.answer.quality` is charted twice on purpose.** Once by `verdict`, once
+  by `verdict` *and* `decided_by`. A rising `unsupported` decided by `heuristic`
+  is the model inventing figures; the same count decided by `model` may only be a
+  weak judge. Summed into one series they cancel, so the split is the tile that
+  matters and the total is the one that looks tidy.
+- **The gap 1 and gap 2 queries were validated for syntax, not against data.**
+  Every other query in this file was written against a live tenant with real
+  numbers behind it. `o11yag.answer.quality`, `o11yag.feedback` and
+  `o11yag.security.events` have never been ingested — the build that emits them
+  has not been deployed — so their tiles are shape-correct and unproven. Re-check
+  them once the stack has run.
 - **No audit-record tiles.** Tool arguments, approval decisions and conversation
   text are emitted as OTLP **logs**, not metrics, and need the `logs.ingest` scope
   on the Dynatrace token. Without it the Collector accepts them and Dynatrace

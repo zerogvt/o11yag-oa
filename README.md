@@ -191,8 +191,23 @@ in it.
    ```
    The token needs the **Ingest metrics**, **Ingest OpenTelemetry traces** and
    **Ingest logs** scopes. `Ingest logs` is what carries the audit records —
-   without it the Collector accepts them and Dynatrace rejects them, which is
-   silent unless you read the Collector's own log.
+   without it the Collector accepts them and Dynatrace rejects them with a 403
+   naming the missing scope, which is silent from Grail's side and obvious in the
+   Collector's own log:
+   ```
+   kubectl logs -l app.kubernetes.io/name=o11yag-otel-collector -n o11yag \
+     | grep -i "missing required scope"
+   ```
+
+   **Rotating the token needs a Collector restart.** Env vars are injected from
+   the Secret when the container starts, so rewriting the Secret leaves a running
+   Collector on the old token and the identical 403 keeps arriving — which reads
+   as the new token being wrong rather than as never having been loaded.
+   `build_deploy.sh` restarts the Collector whenever it rewrites the Secret; if
+   you change it by hand, do it yourself:
+   ```
+   kubectl rollout restart deployment/o11yag-otel-collector -n o11yag
+   ```
 
 3. **Build and deploy**:
    ```
@@ -285,10 +300,27 @@ disagreeing. `/chat` returns its `trace_id` for exactly this: the feedback
 arrives minutes or days later on a trace of its own, and `audit.subject_trace_id`
 is what makes a thumbs-down openable rather than merely countable.
 
-**What it cost.** One extra model call per answered question, on the ticket's own
-latency, counted into `o11yag.task.tokens` and `.cost.usd` like any other — a
-judge you do not pay for is a judge that did not run. Set `JUDGE_MODE: heuristic`
-and the signal survives at zero marginal cost and reduced coverage.
+**What it cost, measured.** One extra model call per answered question, on the
+ticket's own latency, counted into `o11yag.task.tokens` and `.cost.usd` like any
+other — a judge you do not pay for is a judge that did not run. On this stack
+that call buys nothing at all, and the numbers are the point:
+
+> Over the first 10 graded answers against a live `qwen:0.5b`, the judge model
+> produced **0 usable verdicts** while spending **2,353 tokens** and adding
+> **1,462 ms** (p50) to every answered ticket. Four replies were JSON-shaped with
+> a non-boolean `supported`, two contained no JSON at all. Every verdict on the
+> dashboard was the deterministic check's.
+
+Small sample, and it will not improve: it is the same finding as "2 usable
+`lookup_order` arguments out of 51", for grading instead of tool calling. The
+reason it is visible at all is `quality.decided_by` — without that dimension the
+verdicts look identical to a judge that agrees with everything, and a judge that
+agrees with everything is indistinguishable from one that was never asked.
+
+`JUDGE_MODE: heuristic` drops the model call and keeps the signal at zero
+marginal cost and reduced coverage; it is the right setting for this stack, and
+the default stays `model` for the same reason `PLANNER_MODE` does — so a run
+shows the truth about the model behind the gateway rather than hiding it.
 
 **What is still open, and it is the important part.** The judge is a detector,
 and `JUDGE_ACTION` defaults to `observe` — the unsupported answer is recorded and
@@ -491,11 +523,15 @@ fetch logs
 [`dashboards/o11yag.json`](dashboards/o11yag.json) — deploy with
 `cd dashboards && ./deploy.sh`, which posts it to the Dynatrace Document API
 using the same `$DT_ENVIRONMENT` / `$DT_PLATFORM_TOKEN` the Dynatrace MCP plugin
-uses. (Manual **Dashboards → Upload** also works.) Twelve tiles over the `o11yag.*` metrics: per-ticket KPIs,
-volume and intent mix, loop depth, latency, token and cost breakdown, MCP tool
-calls, and retrieval quality. Every query was validated against a live tenant
-before the file was written. See [`dashboards/README.md`](dashboards/README.md)
-for what each tile is for and which metrics deliberately have no tile yet.
+uses. (Manual **Dashboards → Upload** also works.) Seventeen tiles over the `o11yag.*`
+metrics: per-ticket KPIs, volume and intent mix, loop depth, latency, token and
+cost breakdown, MCP tool calls, retrieval quality, answer-quality verdicts, human
+feedback, security detections and approval wait. Every query was validated
+against a live tenant except the three gap 1 / gap 2 series, which have not been
+ingested yet and are validated for syntax only. See
+[`dashboards/README.md`](dashboards/README.md) for what each tile is for, why
+three of them are empty when the system is healthy, and the DQL gotcha that made
+the error-rate tile go blank exactly when there were no errors.
 
 ## Trace context
 

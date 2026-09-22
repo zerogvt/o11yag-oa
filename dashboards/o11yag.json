@@ -1,493 +1,683 @@
 {
- "version": 21,
- "variables": [],
- "annotations": [],
- "importedWithCode": false,
- "settings": {
-  "gridLayout": {
-   "columnsCount": 24,
-   "mode": "responsive"
+  "version": 21,
+  "variables": [],
+  "annotations": [],
+  "importedWithCode": false,
+  "settings": {
+    "gridLayout": {
+      "columnsCount": 24,
+      "mode": "responsive"
+    }
+  },
+  "tiles": {
+    "0": {
+      "type": "markdown",
+      "content": "# o11yag \u2014 agent operations\n\nMetrics the o11yag stack emits about its own agent work, via OpenLLMetry \u2192 OTel Collector \u2192 Dynatrace.\n\nEvery metric here is measured **per resolved ticket**, not per LLM call \u2014 the roll-up the SDKs do not give you. `intent` is what the orchestrator routed the ticket as; `tenant` is the customer it belonged to.\n\n**Loop depth** (`llm_calls`) is the series to watch: agent work is non-deterministic, so there is no fixed call graph to alert on, and this is the closest thing to a baseline."
+    },
+    "1": {
+      "type": "data",
+      "title": "Tickets handled",
+      "description": "Total tickets the orchestrator completed in the timeframe.",
+      "query": "timeseries all = sum(o11yag.tasks)\n| fieldsAdd tickets = arraySum(all)\n| fields tickets",
+      "visualization": "singleValue",
+      "visualizationSettings": {
+        "singleValue": {
+          "label": "tickets",
+          "recordField": "tickets"
+        },
+        "unitsOverrides": [
+          {
+            "added": 1757030400000,
+            "baseUnit": "count",
+            "cascade": null,
+            "decimals": 0,
+            "delimiter": true,
+            "displayUnit": null,
+            "identifier": "tickets",
+            "suffix": "",
+            "unitCategory": "unspecified"
+          }
+        ]
+      },
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "2": {
+      "type": "data",
+      "title": "Error rate",
+      "description": "Share of tickets that ended in outcome=error. Computed by grouping on outcome rather than by filtering a second series: a filtered timeseries that matches nothing drops every series in the same block, so the old query went blank whenever there were no errors \u2014 the healthy case rendered as a broken tile.",
+      "query": "timeseries tickets = sum(o11yag.tasks), by: {outcome}\n| fieldsAdd n = arraySum(tickets)\n| summarize all = sum(n), err = sum(if(outcome == \"error\", n, else: 0))\n| fieldsAdd error_rate = err * 100.0 / all\n| fields error_rate",
+      "visualization": "singleValue",
+      "visualizationSettings": {
+        "singleValue": {
+          "label": "% of tickets",
+          "recordField": "error_rate"
+        },
+        "unitsOverrides": [
+          {
+            "added": 1757030400000,
+            "baseUnit": "percent",
+            "cascade": null,
+            "decimals": 1,
+            "delimiter": true,
+            "displayUnit": null,
+            "identifier": "error_rate",
+            "suffix": "",
+            "unitCategory": "percentage"
+          }
+        ]
+      },
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "3": {
+      "type": "data",
+      "title": "Cost",
+      "description": "Cost of all tickets. Priced from tokens \u2014 see the README: a local model is free, so this demonstrates attribution, it does not measure spend.",
+      "query": "timeseries cost = sum(o11yag.task.cost.usd)\n| fieldsAdd total_cost_usd = arraySum(cost)\n| fields total_cost_usd",
+      "visualization": "singleValue",
+      "visualizationSettings": {
+        "singleValue": {
+          "label": "USD",
+          "recordField": "total_cost_usd"
+        },
+        "unitsOverrides": [
+          {
+            "added": 1757030400000,
+            "baseUnit": "count",
+            "cascade": null,
+            "decimals": 4,
+            "delimiter": true,
+            "displayUnit": null,
+            "identifier": "total_cost_usd",
+            "suffix": "",
+            "unitCategory": "unspecified"
+          }
+        ]
+      },
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "4": {
+      "type": "data",
+      "title": "Avg loop depth",
+      "description": "Mean LLM calls per ticket. Rising here means the agent is working harder for the same outcome.",
+      "query": "timeseries calls = avg(o11yag.task.llm_calls)\n| fieldsAdd avg_llm_calls = arrayAvg(calls)\n| fields avg_llm_calls",
+      "visualization": "singleValue",
+      "visualizationSettings": {
+        "singleValue": {
+          "label": "LLM calls / ticket",
+          "recordField": "avg_llm_calls"
+        },
+        "unitsOverrides": [
+          {
+            "added": 1757030400000,
+            "baseUnit": "count",
+            "cascade": null,
+            "decimals": 2,
+            "delimiter": true,
+            "displayUnit": null,
+            "identifier": "avg_llm_calls",
+            "suffix": "",
+            "unitCategory": "unspecified"
+          }
+        ]
+      },
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "5": {
+      "type": "data",
+      "title": "Ticket volume by outcome",
+      "description": "ok / error / escalated / blocked over time. 'blocked' means the approval gate refused a tool call.",
+      "query": "timeseries tickets = sum(o11yag.tasks), by: {outcome}",
+      "visualization": "lineChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "curve": "smooth",
+          "gapPolicy": "connect",
+          "legend": {
+            "position": "bottom"
+          },
+          "xAxisScaling": "analyzedTimeframe"
+        }
+      },
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "6": {
+      "type": "data",
+      "title": "Ticket mix by intent",
+      "description": "How the orchestrator routed traffic. If one intent is missing entirely, routing is broken \u2014 that is how the knowledge worker went dark.",
+      "query": "timeseries t = sum(o11yag.tasks), by: {intent}\n| fieldsAdd tickets = arraySum(t)\n| fields intent, tickets",
+      "visualization": "donutChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "circleChartSettings": {
+            "showTotalValue": true,
+            "valueType": "absolute"
+          }
+        }
+      },
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "7": {
+      "type": "data",
+      "title": "Loop depth per ticket, by intent",
+      "description": "Mean and p90 LLM calls per ticket. The p90 is where a non-terminating loop shows up first.",
+      "query": "timeseries {\n  avg_calls = avg(o11yag.task.llm_calls),\n  p90_calls = percentile(o11yag.task.llm_calls, 90, rollup: avg)\n}, by: {intent}",
+      "visualization": "lineChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "curve": "smooth",
+          "gapPolicy": "connect",
+          "legend": {
+            "position": "bottom"
+          },
+          "xAxisScaling": "analyzedTimeframe"
+        }
+      },
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "8": {
+      "type": "data",
+      "title": "Ticket latency, by intent",
+      "description": "Wall clock per ticket. Includes time waiting for a human approval \u2014 subtract o11yag.approval.wait for machine time.",
+      "query": "timeseries {\n  avg_ms = avg(o11yag.task.latency),\n  p95_ms = percentile(o11yag.task.latency, 95, rollup: avg)\n}, by: {intent}",
+      "visualization": "lineChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "curve": "smooth",
+          "gapPolicy": "connect",
+          "legend": {
+            "position": "bottom"
+          },
+          "xAxisScaling": "analyzedTimeframe"
+        }
+      },
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "9": {
+      "type": "data",
+      "title": "Tokens by intent",
+      "description": "Token consumption per intent \u2014 the driver behind the cost tile.",
+      "query": "timeseries tokens = sum(o11yag.task.tokens), by: {intent}",
+      "visualization": "areaChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "curve": "smooth",
+          "gapPolicy": "connect",
+          "legend": {
+            "position": "bottom"
+          },
+          "xAxisScaling": "analyzedTimeframe"
+        }
+      },
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "10": {
+      "type": "data",
+      "title": "Cost by intent",
+      "description": "Which kind of ticket is expensive, which is cheap.",
+      "query": "timeseries cost_usd = sum(o11yag.task.cost.usd), by: {intent}",
+      "visualization": "areaChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "curve": "smooth",
+          "gapPolicy": "connect",
+          "legend": {
+            "position": "bottom"
+          },
+          "xAxisScaling": "analyzedTimeframe"
+        }
+      },
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "11": {
+      "type": "data",
+      "title": "MCP tool calls",
+      "description": "What the agent actually did to the systems of record, by tool and outcome. This is the half of an agent stack that is normally a blind spot.",
+      "query": "timeseries c = sum(o11yag.tool.calls), by: {tool, outcome}\n| fieldsAdd calls = arraySum(c)\n| fields tool, outcome, calls\n| sort calls desc",
+      "visualization": "categoricalBarChart",
+      "visualizationSettings": {},
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "12": {
+      "type": "data",
+      "title": "Retrieval quality",
+      "description": "Best similarity score and chunks returned per RAG query. Retrieval latency being fine tells you nothing; this tells you whether the answer had anything to stand on.",
+      "query": "timeseries {\n  top_score = avg(o11yag.retrieval.top_score),\n  hits = avg(o11yag.retrieval.hits)\n}, by: {collection}",
+      "visualization": "lineChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "curve": "smooth",
+          "gapPolicy": "connect",
+          "legend": {
+            "position": "bottom"
+          },
+          "xAxisScaling": "analyzedTimeframe"
+        }
+      },
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "13": {
+      "type": "markdown",
+      "content": "### If a tile is empty\n\n**Empty is the healthy case for three tiles** \u2014 Human feedback, Security detections, and (when no attack is switched on) parts of Answer quality. They are the tiles where \"nothing to report\" and \"nothing arriving\" look the same, so check **Tickets handled** first: if that has data, the pipeline is fine.\n\n**Retrieval and Answer quality tiles empty** means no ticket routed to `question`. Check the ticket mix tile above before suspecting Qdrant or the judge.\n\n**Nothing at all** usually means the Collector is dropping data. Its own log says so: `kubectl logs -l app.kubernetes.io/name=o11yag-otel-collector -n o11yag`.\n\nAudit records (tool arguments, approval decisions, conversation text, injection findings) are OTLP **logs**, not metrics, and are not on this dashboard at all \u2014 they need the `logs.ingest` token scope. Query them with `fetch logs | filter isNotNull(audit.event.type)`."
+    },
+    "14": {
+      "type": "markdown",
+      "content": "## Answer quality, human feedback, and the security act\n\nThe series added with the answer judge and the adversarial detectors, plus the approval gate's own wait time.\n\n**Three of these are empty in the healthy case**, which looks exactly like a broken tile. Each description below says what empty means for that tile \u2014 read it before concluding the pipeline is down."
+    },
+    "15": {
+      "type": "data",
+      "title": "Answer quality",
+      "description": "Groundedness verdicts on answers that were actually given \u2014 the failure the retrieval score cannot see, because the document retrieved was the right one. `unsupported` means the answer stated something its extracts do not. Empty means no ticket was routed to `question`, or JUDGE_MODE is off.",
+      "query": "timeseries answers = sum(o11yag.answer.quality), by: {verdict}",
+      "visualization": "lineChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "curve": "smooth",
+          "gapPolicy": "connect",
+          "legend": {
+            "position": "bottom"
+          },
+          "xAxisScaling": "analyzedTimeframe"
+        }
+      },
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "16": {
+      "type": "data",
+      "title": "Verdicts, by who decided them",
+      "description": "The same verdicts split by grader. `heuristic` is the deterministic check \u2014 an invented figure, or an answer whose words are absent from its extracts. `model` is the judge model. Rising `unsupported` decided by `heuristic` is the model inventing numbers; the same count decided by `model` may only be a weak judge. Summed into one series they cancel, which is why this is its own tile. A judge that never decides anything shows here as `model` never appearing.",
+      "query": "timeseries answers = sum(o11yag.answer.quality), by: {verdict, decided_by}",
+      "visualization": "lineChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "curve": "smooth",
+          "gapPolicy": "connect",
+          "legend": {
+            "position": "bottom"
+          },
+          "xAxisScaling": "analyzedTimeframe"
+        }
+      },
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "17": {
+      "type": "data",
+      "title": "Human feedback",
+      "description": "Ratings from POST /feedback \u2014 the only signal on this dashboard the stack does not generate about itself, and so the only one that can contradict the rest. **Empty is the normal case**: nothing sends feedback automatically, deliberately. A stream of `down` against a healthy Answer quality tile means the judge is wrong, and no internal signal could have told you.",
+      "query": "timeseries ratings = sum(o11yag.feedback), by: {rating}",
+      "visualization": "lineChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "curve": "smooth",
+          "gapPolicy": "connect",
+          "legend": {
+            "position": "bottom"
+          },
+          "xAxisScaling": "analyzedTimeframe"
+        }
+      },
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "18": {
+      "type": "data",
+      "title": "Security detections",
+      "description": "Prompt injection in the retrieved corpus, poisoned MCP tool descriptions, and tool-catalogue changes. **Empty is the healthy case** \u2014 every attack is off by default \u2014 so this tile reads identically whether nothing is happening or the whole pipeline is down. Check Tickets handled before trusting it. `action` separates a finding that was acted on (`quarantined`, `redacted`) from one only recorded (`observed`); they must never be summed.",
+      "query": "timeseries detections = sum(o11yag.security.events), by: {kind, action}",
+      "visualization": "lineChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "curve": "smooth",
+          "gapPolicy": "connect",
+          "legend": {
+            "position": "bottom"
+          },
+          "xAxisScaling": "analyzedTimeframe"
+        }
+      },
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "19": {
+      "type": "data",
+      "title": "Approval wait",
+      "description": "Human decision time, kept out of task latency on purpose: a reviewer who goes to lunch would otherwise swamp every percentile in the stack. Subtract it from o11yag.task.latency to get machine time. A `timeout` series pinned flat at APPROVAL_TIMEOUT_S (180s) is loadgen running unattended \u2014 refunds above AUTO_APPROVE_MAX_EUR always wait for a person, and nobody is there to decide.",
+      "query": "timeseries {\n  p50 = median(o11yag.approval.wait, rollup: avg),\n  p90 = percentile(o11yag.approval.wait, 90, rollup: avg)\n}, by: {decision}",
+      "visualization": "lineChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "curve": "smooth",
+          "gapPolicy": "connect",
+          "legend": {
+            "position": "bottom"
+          },
+          "xAxisScaling": "analyzedTimeframe"
+        }
+      },
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    }
+  },
+  "layouts": {
+    "0": {
+      "x": 0,
+      "y": 0,
+      "w": 24,
+      "h": 4
+    },
+    "1": {
+      "x": 0,
+      "y": 4,
+      "w": 6,
+      "h": 4
+    },
+    "2": {
+      "x": 6,
+      "y": 4,
+      "w": 6,
+      "h": 4
+    },
+    "3": {
+      "x": 12,
+      "y": 4,
+      "w": 6,
+      "h": 4
+    },
+    "4": {
+      "x": 18,
+      "y": 4,
+      "w": 6,
+      "h": 4
+    },
+    "5": {
+      "x": 0,
+      "y": 8,
+      "w": 12,
+      "h": 7
+    },
+    "6": {
+      "x": 12,
+      "y": 8,
+      "w": 12,
+      "h": 7
+    },
+    "7": {
+      "x": 0,
+      "y": 15,
+      "w": 12,
+      "h": 7
+    },
+    "8": {
+      "x": 12,
+      "y": 15,
+      "w": 12,
+      "h": 7
+    },
+    "9": {
+      "x": 0,
+      "y": 22,
+      "w": 12,
+      "h": 7
+    },
+    "10": {
+      "x": 12,
+      "y": 22,
+      "w": 12,
+      "h": 7
+    },
+    "11": {
+      "x": 0,
+      "y": 29,
+      "w": 12,
+      "h": 7
+    },
+    "12": {
+      "x": 12,
+      "y": 29,
+      "w": 12,
+      "h": 7
+    },
+    "13": {
+      "x": 0,
+      "y": 60,
+      "w": 24,
+      "h": 5
+    },
+    "14": {
+      "x": 0,
+      "y": 36,
+      "w": 24,
+      "h": 3
+    },
+    "15": {
+      "x": 0,
+      "y": 39,
+      "w": 12,
+      "h": 7
+    },
+    "16": {
+      "x": 12,
+      "y": 39,
+      "w": 12,
+      "h": 7
+    },
+    "17": {
+      "x": 0,
+      "y": 46,
+      "w": 12,
+      "h": 7
+    },
+    "18": {
+      "x": 12,
+      "y": 46,
+      "w": 12,
+      "h": 7
+    },
+    "19": {
+      "x": 0,
+      "y": 53,
+      "w": 24,
+      "h": 7
+    }
   }
- },
- "tiles": {
-  "0": {
-   "type": "markdown",
-   "content": "# o11yag \u2014 agent operations\n\nMetrics the o11yag stack emits about its own agent work, via OpenLLMetry \u2192 OTel Collector \u2192 Dynatrace.\n\nEvery metric here is measured **per resolved ticket**, not per LLM call \u2014 the roll-up the SDKs do not give you. `intent` is what the orchestrator routed the ticket as; `tenant` is the customer it belonged to.\n\n**Loop depth** (`llm_calls`) is the series to watch: agent work is non-deterministic, so there is no fixed call graph to alert on, and this is the closest thing to a baseline."
-  },
-  "1": {
-   "type": "data",
-   "title": "Tickets handled",
-   "description": "Total tickets the orchestrator completed in the timeframe.",
-   "query": "timeseries all = sum(o11yag.tasks)\n| fieldsAdd tickets = arraySum(all)\n| fields tickets",
-   "visualization": "singleValue",
-   "visualizationSettings": {
-    "singleValue": {
-     "label": "tickets",
-     "recordField": "tickets"
-    },
-    "unitsOverrides": [
-     {
-      "added": 1757030400000,
-      "baseUnit": "count",
-      "cascade": null,
-      "decimals": 0,
-      "delimiter": true,
-      "displayUnit": null,
-      "identifier": "tickets",
-      "suffix": "",
-      "unitCategory": "unspecified"
-     }
-    ]
-   },
-   "querySettings": {
-    "defaultSamplingRatio": 10,
-    "defaultScanLimitGbytes": 500,
-    "enableSampling": false,
-    "maxResultMegaBytes": 1,
-    "maxResultRecords": 1000
-   },
-   "davis": {
-    "davisVisualization": {
-     "isAvailable": true
-    },
-    "enabled": false
-   }
-  },
-  "2": {
-   "type": "data",
-   "title": "Error rate",
-   "description": "Share of tickets that ended with outcome=error.",
-   "query": "timeseries {\n  all = sum(o11yag.tasks),\n  err = sum(o11yag.tasks, filter: {outcome == \"error\"})\n}\n| fieldsAdd error_rate = arraySum(err) * 100.0 / arraySum(all)\n| fields error_rate",
-   "visualization": "singleValue",
-   "visualizationSettings": {
-    "singleValue": {
-     "label": "% of tickets",
-     "recordField": "error_rate"
-    },
-    "unitsOverrides": [
-     {
-      "added": 1757030400000,
-      "baseUnit": "percent",
-      "cascade": null,
-      "decimals": 1,
-      "delimiter": true,
-      "displayUnit": null,
-      "identifier": "error_rate",
-      "suffix": "",
-      "unitCategory": "percentage"
-     }
-    ]
-   },
-   "querySettings": {
-    "defaultSamplingRatio": 10,
-    "defaultScanLimitGbytes": 500,
-    "enableSampling": false,
-    "maxResultMegaBytes": 1,
-    "maxResultRecords": 1000
-   },
-   "davis": {
-    "davisVisualization": {
-     "isAvailable": true
-    },
-    "enabled": false
-   }
-  },
-  "3": {
-   "type": "data",
-   "title": "Cost",
-   "description": "Cost of all tickets. Priced from tokens \u2014 see the README: a local model is free, so this demonstrates attribution, it does not measure spend.",
-   "query": "timeseries cost = sum(o11yag.task.cost.usd)\n| fieldsAdd total_cost_usd = arraySum(cost)\n| fields total_cost_usd",
-   "visualization": "singleValue",
-   "visualizationSettings": {
-    "singleValue": {
-     "label": "USD",
-     "recordField": "total_cost_usd"
-    },
-    "unitsOverrides": [
-     {
-      "added": 1757030400000,
-      "baseUnit": "count",
-      "cascade": null,
-      "decimals": 4,
-      "delimiter": true,
-      "displayUnit": null,
-      "identifier": "total_cost_usd",
-      "suffix": "",
-      "unitCategory": "unspecified"
-     }
-    ]
-   },
-   "querySettings": {
-    "defaultSamplingRatio": 10,
-    "defaultScanLimitGbytes": 500,
-    "enableSampling": false,
-    "maxResultMegaBytes": 1,
-    "maxResultRecords": 1000
-   },
-   "davis": {
-    "davisVisualization": {
-     "isAvailable": true
-    },
-    "enabled": false
-   }
-  },
-  "4": {
-   "type": "data",
-   "title": "Avg loop depth",
-   "description": "Mean LLM calls per ticket. Rising here means the agent is working harder for the same outcome.",
-   "query": "timeseries calls = avg(o11yag.task.llm_calls)\n| fieldsAdd avg_llm_calls = arrayAvg(calls)\n| fields avg_llm_calls",
-   "visualization": "singleValue",
-   "visualizationSettings": {
-    "singleValue": {
-     "label": "LLM calls / ticket",
-     "recordField": "avg_llm_calls"
-    },
-    "unitsOverrides": [
-     {
-      "added": 1757030400000,
-      "baseUnit": "count",
-      "cascade": null,
-      "decimals": 2,
-      "delimiter": true,
-      "displayUnit": null,
-      "identifier": "avg_llm_calls",
-      "suffix": "",
-      "unitCategory": "unspecified"
-     }
-    ]
-   },
-   "querySettings": {
-    "defaultSamplingRatio": 10,
-    "defaultScanLimitGbytes": 500,
-    "enableSampling": false,
-    "maxResultMegaBytes": 1,
-    "maxResultRecords": 1000
-   },
-   "davis": {
-    "davisVisualization": {
-     "isAvailable": true
-    },
-    "enabled": false
-   }
-  },
-  "5": {
-   "type": "data",
-   "title": "Ticket volume by outcome",
-   "description": "ok / error / escalated / blocked over time. 'blocked' means the approval gate refused a tool call.",
-   "query": "timeseries tickets = sum(o11yag.tasks), by: {outcome}",
-   "visualization": "lineChart",
-   "visualizationSettings": {
-    "chartSettings": {
-     "curve": "smooth",
-     "gapPolicy": "connect",
-     "legend": {
-      "position": "bottom"
-     },
-     "xAxisScaling": "analyzedTimeframe"
-    }
-   },
-   "querySettings": {
-    "defaultSamplingRatio": 10,
-    "defaultScanLimitGbytes": 500,
-    "enableSampling": false,
-    "maxResultMegaBytes": 1,
-    "maxResultRecords": 1000
-   },
-   "davis": {
-    "davisVisualization": {
-     "isAvailable": true
-    },
-    "enabled": false
-   }
-  },
-  "6": {
-   "type": "data",
-   "title": "Ticket mix by intent",
-   "description": "How the orchestrator routed traffic. If one intent is missing entirely, routing is broken \u2014 that is how the knowledge worker went dark.",
-   "query": "timeseries t = sum(o11yag.tasks), by: {intent}\n| fieldsAdd tickets = arraySum(t)\n| fields intent, tickets",
-   "visualization": "donutChart",
-   "visualizationSettings": {
-    "chartSettings": {
-     "circleChartSettings": {
-      "showTotalValue": true,
-      "valueType": "absolute"
-     }
-    }
-   },
-   "querySettings": {
-    "defaultSamplingRatio": 10,
-    "defaultScanLimitGbytes": 500,
-    "enableSampling": false,
-    "maxResultMegaBytes": 1,
-    "maxResultRecords": 1000
-   },
-   "davis": {
-    "davisVisualization": {
-     "isAvailable": true
-    },
-    "enabled": false
-   }
-  },
-  "7": {
-   "type": "data",
-   "title": "Loop depth per ticket, by intent",
-   "description": "Mean and p90 LLM calls per ticket. The p90 is where a non-terminating loop shows up first.",
-   "query": "timeseries {\n  avg_calls = avg(o11yag.task.llm_calls),\n  p90_calls = percentile(o11yag.task.llm_calls, 90, rollup: avg)\n}, by: {intent}",
-   "visualization": "lineChart",
-   "visualizationSettings": {
-    "chartSettings": {
-     "curve": "smooth",
-     "gapPolicy": "connect",
-     "legend": {
-      "position": "bottom"
-     },
-     "xAxisScaling": "analyzedTimeframe"
-    }
-   },
-   "querySettings": {
-    "defaultSamplingRatio": 10,
-    "defaultScanLimitGbytes": 500,
-    "enableSampling": false,
-    "maxResultMegaBytes": 1,
-    "maxResultRecords": 1000
-   },
-   "davis": {
-    "davisVisualization": {
-     "isAvailable": true
-    },
-    "enabled": false
-   }
-  },
-  "8": {
-   "type": "data",
-   "title": "Ticket latency, by intent",
-   "description": "Wall clock per ticket. Includes time waiting for a human approval \u2014 subtract o11yag.approval.wait for machine time.",
-   "query": "timeseries {\n  avg_ms = avg(o11yag.task.latency),\n  p95_ms = percentile(o11yag.task.latency, 95, rollup: avg)\n}, by: {intent}",
-   "visualization": "lineChart",
-   "visualizationSettings": {
-    "chartSettings": {
-     "curve": "smooth",
-     "gapPolicy": "connect",
-     "legend": {
-      "position": "bottom"
-     },
-     "xAxisScaling": "analyzedTimeframe"
-    }
-   },
-   "querySettings": {
-    "defaultSamplingRatio": 10,
-    "defaultScanLimitGbytes": 500,
-    "enableSampling": false,
-    "maxResultMegaBytes": 1,
-    "maxResultRecords": 1000
-   },
-   "davis": {
-    "davisVisualization": {
-     "isAvailable": true
-    },
-    "enabled": false
-   }
-  },
-  "9": {
-   "type": "data",
-   "title": "Tokens by intent",
-   "description": "Token consumption per intent \u2014 the driver behind the cost tile.",
-   "query": "timeseries tokens = sum(o11yag.task.tokens), by: {intent}",
-   "visualization": "areaChart",
-   "visualizationSettings": {
-    "chartSettings": {
-     "curve": "smooth",
-     "gapPolicy": "connect",
-     "legend": {
-      "position": "bottom"
-     },
-     "xAxisScaling": "analyzedTimeframe"
-    }
-   },
-   "querySettings": {
-    "defaultSamplingRatio": 10,
-    "defaultScanLimitGbytes": 500,
-    "enableSampling": false,
-    "maxResultMegaBytes": 1,
-    "maxResultRecords": 1000
-   },
-   "davis": {
-    "davisVisualization": {
-     "isAvailable": true
-    },
-    "enabled": false
-   }
-  },
-  "10": {
-   "type": "data",
-   "title": "Cost by intent",
-   "description": "Which kind of ticket is expensive, which is cheap.",
-   "query": "timeseries cost_usd = sum(o11yag.task.cost.usd), by: {intent}",
-   "visualization": "areaChart",
-   "visualizationSettings": {
-    "chartSettings": {
-     "curve": "smooth",
-     "gapPolicy": "connect",
-     "legend": {
-      "position": "bottom"
-     },
-     "xAxisScaling": "analyzedTimeframe"
-    }
-   },
-   "querySettings": {
-    "defaultSamplingRatio": 10,
-    "defaultScanLimitGbytes": 500,
-    "enableSampling": false,
-    "maxResultMegaBytes": 1,
-    "maxResultRecords": 1000
-   },
-   "davis": {
-    "davisVisualization": {
-     "isAvailable": true
-    },
-    "enabled": false
-   }
-  },
-  "11": {
-   "type": "data",
-   "title": "MCP tool calls",
-   "description": "What the agent actually did to the systems of record, by tool and outcome. This is the half of an agent stack that is normally a blind spot.",
-   "query": "timeseries c = sum(o11yag.tool.calls), by: {tool, outcome}\n| fieldsAdd calls = arraySum(c)\n| fields tool, outcome, calls\n| sort calls desc",
-   "visualization": "categoricalBarChart",
-   "visualizationSettings": {},
-   "querySettings": {
-    "defaultSamplingRatio": 10,
-    "defaultScanLimitGbytes": 500,
-    "enableSampling": false,
-    "maxResultMegaBytes": 1,
-    "maxResultRecords": 1000
-   },
-   "davis": {
-    "davisVisualization": {
-     "isAvailable": true
-    },
-    "enabled": false
-   }
-  },
-  "12": {
-   "type": "data",
-   "title": "Retrieval quality",
-   "description": "Best similarity score and chunks returned per RAG query. Retrieval latency being fine tells you nothing; this tells you whether the answer had anything to stand on.",
-   "query": "timeseries {\n  top_score = avg(o11yag.retrieval.top_score),\n  hits = avg(o11yag.retrieval.hits)\n}, by: {collection}",
-   "visualization": "lineChart",
-   "visualizationSettings": {
-    "chartSettings": {
-     "curve": "smooth",
-     "gapPolicy": "connect",
-     "legend": {
-      "position": "bottom"
-     },
-     "xAxisScaling": "analyzedTimeframe"
-    }
-   },
-   "querySettings": {
-    "defaultSamplingRatio": 10,
-    "defaultScanLimitGbytes": 500,
-    "enableSampling": false,
-    "maxResultMegaBytes": 1,
-    "maxResultRecords": 1000
-   },
-   "davis": {
-    "davisVisualization": {
-     "isAvailable": true
-    },
-    "enabled": false
-   }
-  },
-  "13": {
-   "type": "markdown",
-   "content": "### If a tile is empty\n\n**`o11yag.approval.wait` has no tile yet** \u2014 it is only emitted once the approval gate actually fires, which needs a refund above `AUTO_APPROVE_MAX_EUR` (send one for `ORD-1004`, \u20ac430). Add a tile for it once you have data.\n\n**Retrieval tiles empty** means no ticket routed to `question`. Check the ticket mix tile above before suspecting Qdrant.\n\n**Nothing at all** usually means the Collector is dropping data. Its own log says so: `kubectl logs -l app.kubernetes.io/name=o11yag-otel-collector -n o11yag`.\n\nAudit records (tool arguments, approvals, conversation text) are **logs**, not metrics, and are not on this dashboard \u2014 they need the `logs.ingest` token scope."
-  }
- },
- "layouts": {
-  "0": {
-   "x": 0,
-   "y": 0,
-   "w": 24,
-   "h": 4
-  },
-  "1": {
-   "x": 0,
-   "y": 4,
-   "w": 6,
-   "h": 4
-  },
-  "2": {
-   "x": 6,
-   "y": 4,
-   "w": 6,
-   "h": 4
-  },
-  "3": {
-   "x": 12,
-   "y": 4,
-   "w": 6,
-   "h": 4
-  },
-  "4": {
-   "x": 18,
-   "y": 4,
-   "w": 6,
-   "h": 4
-  },
-  "5": {
-   "x": 0,
-   "y": 8,
-   "w": 12,
-   "h": 7
-  },
-  "6": {
-   "x": 12,
-   "y": 8,
-   "w": 12,
-   "h": 7
-  },
-  "7": {
-   "x": 0,
-   "y": 15,
-   "w": 12,
-   "h": 7
-  },
-  "8": {
-   "x": 12,
-   "y": 15,
-   "w": 12,
-   "h": 7
-  },
-  "9": {
-   "x": 0,
-   "y": 22,
-   "w": 12,
-   "h": 7
-  },
-  "10": {
-   "x": 12,
-   "y": 22,
-   "w": 12,
-   "h": 7
-  },
-  "11": {
-   "x": 0,
-   "y": 29,
-   "w": 12,
-   "h": 7
-  },
-  "12": {
-   "x": 12,
-   "y": 29,
-   "w": 12,
-   "h": 7
-  },
-  "13": {
-   "x": 0,
-   "y": 36,
-   "w": 24,
-   "h": 4
-  }
- }
 }
