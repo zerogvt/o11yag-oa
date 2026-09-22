@@ -21,14 +21,26 @@ scraped vendor page, a wiki, a support macro, an uploaded PDF.
 
 What makes it an observability problem rather than only a security one is that
 the stack cannot see it happen. Retrieval is healthy — `rag.top_score` is high,
-because the poisoned document really is a good match. No span errors. If the
-model complies, the resulting tool call is well-formed and in-contract, so
-`planner.validate_args` passes it and `step.decided_by` says `model`. The whole
-trace reads as a normal ticket in which the agent decided, by itself, to do
-something nobody asked for.
+because the poisoned document really is a good match. No span errors, no failed
+call, nothing in RED. The whole trace reads as a normal ticket in which the agent
+said something nobody asked it to say.
 
 So the detection has to sit between retrieval and the prompt, which is the only
 place the poisoned text is identifiable as *retrieved* rather than *said*.
+
+WHAT THIS PATH CAN AND CANNOT DO IN THIS STACK, because the demo document asks
+for a refund and will not get one. Retrieval belongs to the knowledge worker, and
+the knowledge worker has no tools — it retrieves and writes prose. The agent that
+holds the tools never retrieves. So an injection planted in this corpus can
+corrupt an *answer* and nothing further; it cannot reach `issue_refund`.
+
+The general attack does end in a tool call, and in an architecture where one
+agent both retrieves and acts it would here too — that is the version worth
+fearing, and it is a straight line from what this demonstrates. But the line is
+not drawn in this repo, and a demo that implies otherwise is doing the thing this
+project exists to argue against. For an injection that really does change what
+the agent *does*, see the tool-catalogue half below: there the text lands in the
+planner's prompt, and that agent has tools.
 
 THE TOOL CATALOGUE IS THE SAME PROBLEM WITH A SHORTER PATH. An MCP tool
 description is attacker-controlled text that goes straight into the planner's

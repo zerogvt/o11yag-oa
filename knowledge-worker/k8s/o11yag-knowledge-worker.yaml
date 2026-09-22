@@ -64,7 +64,7 @@ data:
   # Seed the indirect-prompt-injection document into the corpus. The collection
   # is reseeded when this changes, because Qdrant's volume outlives the pod and
   # a flag that silently does nothing is worse than no flag.
-  KB_POISON_DOC: "false"
+  KB_POISON_DOC: "true"
   #   quarantine  drop a flagged document before it reaches the prompt
   #   observe     let the injection through, to show what it does unopposed
   INJECTION_ACTION: "quarantine"

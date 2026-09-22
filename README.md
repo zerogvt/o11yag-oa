@@ -387,6 +387,10 @@ ships a clean knowledge base and an honest tool catalogue — because an attack
 that ships enabled inside a reference architecture is indistinguishable from a
 backdoor. Each one is a ConfigMap flag away.
 
+> **Running one?** [`docs/SECURITY-DEMOS.md`](docs/SECURITY-DEMOS.md) is the
+> runbook: which flag, what has to restart, what you should see, the ordering
+> that matters for the rug pull, and how to put it all back.
+
 ### Indirect prompt injection through the RAG corpus
 
 The direct kind — a customer typing "ignore your instructions" — is the one
@@ -415,6 +419,17 @@ with the document anyway has recorded an attack it also carried out.
 redeploy, so the knowledge worker compares the stored point count against the
 configured corpus and reseeds when they differ; a flag that silently does nothing
 would be a poor joke in this particular repo.
+
+**What this path cannot do here, stated before anyone demonstrates it and finds
+out.** The planted document tells the agent to issue a refund. It will not get
+one. Retrieval belongs to the knowledge worker, and the knowledge worker has no
+tools — it retrieves and writes prose; the agent that holds the tools never
+retrieves. An injection in this corpus can therefore corrupt an *answer* and
+nothing beyond it. The general attack does end in a tool call, and in an
+architecture where a single agent both retrieves and acts it would end in one
+here — but that is not the architecture in this repo, and a demo implying
+otherwise would be doing exactly what this project argues against. The injection
+that changes what the agent *does* is the tool-catalogue one below.
 
 ### Tool poisoning
 

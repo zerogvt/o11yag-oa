@@ -8,6 +8,10 @@ parts that did not exist then.
 > Function names are used as anchors rather than line numbers.
 > `grep -n "def <name>" <file>` will find any of them.
 
+> To actually stage one of the gap 2 attacks rather than read about it, use
+> [`SECURITY-DEMOS.md`](SECURITY-DEMOS.md) — this document explains the
+> mechanism, that one is the operating procedure.
+
 ---
 
 ## 1. The two ideas
@@ -189,6 +193,14 @@ indistinguishable from policy, which is the mechanism of the attack.
 detector that logs the finding and prompts with the document anyway has recorded
 an attack it also carried out.
 
+**Know the ceiling of this demo before you run it.** The document asks for a
+refund and cannot get one: the knowledge worker has no tools, and the agent that
+does never retrieves. Switching `INJECTION_ACTION` to `observe` shows the
+instruction reaching the model and colouring the *answer* — not a refund, not a
+tool call, not money moving. The version that ends in a tool call is Stop 7's,
+where the attacker-controlled text is a tool description and the agent reading it
+holds the tools.
+
 ### Stop 7 — `action-worker/app.py`, `_screen_catalogue()`
 
 Runs once per ticket, between `mcp_client.list_tools()` and the loop. It catches
@@ -310,6 +322,44 @@ what changes is `action`, and what the model was given.
 `POISON_TOOL_DESCRIPTION: "true"` on the **mcp-crm** ConfigMap and roll that pod
 only. The next ticket's `action_worker` span carries `mcp.tools.changed=true`
 with both digests, and `o11yag.security.tool_catalogue_changed` fires.
+
+### Not yet built: producing a genuinely false answer
+
+Worth separating from everything above, because the two look identical on the
+dashboard and are not the same test.
+
+Raising `JUDGE_MIN_OVERLAP` to `0.9` flags ordinary paraphrase. It exercises the
+judge, the metric and the tile, and it tells you nothing about hallucination — it
+is a plumbing test wearing a quality test's clothes.
+
+Inducing an answer that is actually unsupported needs three things, none of which
+exist yet:
+
+- **`MIN_SCORE: "0.0"` on the knowledge worker.** Without it the retrieval floor
+  refuses most trap questions before the model ever answers, and a refusal scores
+  `declined`, not `unsupported`. Dropping the floor converts the refuse path into
+  the answer-badly path, which is the failure gap 1 is actually about. This one
+  is only a ConfigMap edit.
+- **Trap questions in `loadgen/tickets.py`** — questions demanding a figure the
+  corpus does not contain ("the restocking fee for opened electronics", "the
+  express delivery surcharge"), which invite an invented number and trip
+  `unsupported_number:N` rather than the fuzzier overlap check. The rate is
+  arithmetic, because POPULATION repeats each ticket `weight` times: 15 of the 23
+  entries are policy questions, so traps of total weight `t` are `t / (15 + t)`
+  of everything the knowledge worker answers — weight 4 is roughly 1 in 5. Traps
+  must be phrased as questions and carry no `ORD-` reference or escalation word,
+  or the orchestrator never routes them here. Build it as a flag that is off by
+  default, like the security demos.
+- **`ANSWER_TEMPERATURE` on the knowledge worker.** `llm.py` hardcodes
+  `temperature=0.2`; temperature is the most direct dial on invention and there
+  is currently no way to turn it.
+
+The reason to build this is not the demo. It is that every verdict on the
+dashboard today is unlabelled: 5 of the first 12 answers were flagged
+`low_overlap`, and nothing in the stack can say whether those were right. Trap
+questions are the only cheap source of ground truth — a known-bad answer the
+judge *should* catch, and a known-good one it should leave alone. Without them,
+"the judge flags 40% of answers" is a number with no denominator you can trust.
 
 ---
 

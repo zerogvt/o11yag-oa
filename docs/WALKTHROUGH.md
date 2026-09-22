@@ -6,6 +6,8 @@ agentic architecture. Start here, then read the code in the order below.
 > Once this makes sense, [`UPDATE-GAPS-1-2.md`](UPDATE-GAPS-1-2.md) walks the
 > parts added later: the answer judge, the feedback endpoint, and the detectors
 > for prompt injection, tool poisoning and rug-pulled tool definitions.
+> [`SECURITY-DEMOS.md`](SECURITY-DEMOS.md) is the runbook for switching those
+> attacks on and off.
 
 > Function names are used as anchors rather than line numbers, because line
 > numbers rot. `grep -n "def <name>" <file>` will find any of them.

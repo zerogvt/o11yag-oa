@@ -128,12 +128,35 @@ fi
 echo "* * * Deploying ${TAG} * * *"
 for svc in $SVCS; do
   tmp="$(mktemp -d)"
+  # The checksum rides in the same overlay as the image tag, so one apply carries
+  # both and the pod rolls at most once. Patching it afterwards would work too and
+  # would roll a second time on every build.
+  #
+  # Without it, a ConfigMap-only change is a silent no-op on --no-build: the tag is
+  # unchanged, so the Deployment spec is unchanged, so no pod restarts and the new
+  # setting never reaches the process. That is how you switch KB_POISON_DOC on,
+  # redeploy, and find the corpus still clean.
+  sum="$(sha256sum "${svc}/k8s/o11yag-${svc}.yaml" | cut -c1-12)"
   cat > "${tmp}/kustomization.yaml" <<EOF
 resources:
   - $(pwd)/${svc}/k8s/o11yag-${svc}.yaml
 images:
   - name: o11yag-${svc}
     newTag: "${TAG}"
+patches:
+  - target:
+      kind: Deployment
+      name: o11yag-${svc}
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: o11yag-${svc}
+      spec:
+        template:
+          metadata:
+            annotations:
+              o11yag.config/checksum: "${sum}"
 EOF
   kubectl kustomize --load-restrictor LoadRestrictionsNone "${tmp}" | kubectl apply -f -
   rm -rf "${tmp}"
