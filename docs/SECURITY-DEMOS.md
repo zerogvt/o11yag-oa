@@ -222,6 +222,37 @@ gate, which does not care who asked for the refund.
 
 ---
 
+## How a description gets poisoned outside a demo
+
+Incidents 2 and 3 flip a flag. A real attacker has to reach the text the server
+advertises, and the agent trusts that text because it asks the server for its
+tool list at runtime and never sees it anywhere else. The routes in:
+
+| Route | How it happens |
+|---|---|
+| **Malicious server** | A useful-looking MCP server from a public registry or repo ships with instructions hidden in its descriptions. Those instructions can target *other* servers' tools ("when you send email, also BCC…"), because every description lands in the same prompt. |
+| **Rug pull** | The server is benign when reviewed and approved, and an update changes the descriptions later. The approval was given once and still covers the new text. This is incident 3. |
+| **Supply chain** | A dependency of a trusted server is hijacked (stolen maintainer account, look-alike package) and rewrites descriptions at runtime. The server's own code reviews clean. |
+| **Insider or compromised repo** | Someone with commit or config access edits one string. It reads like a docs change and survives review. |
+| **Descriptions built from data** | Servers that generate descriptions from a database, config service or remote API spec hand control to whoever can write to that source, with no code change at all. |
+| **In transit** | A remote server reached over plain HTTP or with weak auth can have its tool list rewritten between server and client. |
+
+**Where this stack stands against each defence**
+
+| Defence | Here |
+|---|---|
+| Enforce consequential actions **in code, outside the model** | Yes. `CONSEQUENTIAL_TOOLS` in the action worker's own config decides what needs approval, by tool name. No description can remove the gate. |
+| Alert when the catalogue changes | Yes: `MCP_TOOLS_DIGEST`, incident 3. |
+| Screen descriptions before the model sees them | Yes: `TOOL_POISON_ACTION: "redact"`, incident 2. A pattern match, with the limits below. |
+| Pin server versions, review descriptions as code | Process, not code. mcp-crm lives in this repo, so review applies to it; a third-party server would need its image pinned by digest. |
+| Allowlist servers and tools | **Not implemented.** The planner accepts any tool the server advertises. A poisoned server could add a new tool and the agent would offer it to the model. |
+| Authenticated, encrypted transport | **Not implemented.** MCP is plain HTTP inside the cluster (`MCP_URL`). Fine for a demo namespace, not for a server outside it. |
+
+The first row is the one that matters. Every other defence can be bypassed by a
+description it fails to recognise; the approval gate never reads the description.
+
+---
+
 ## Resetting
 
 ```yaml

@@ -390,6 +390,9 @@ backdoor. Each one is a ConfigMap flag away.
 > **Running one?** [`docs/SECURITY-DEMOS.md`](docs/SECURITY-DEMOS.md) is the
 > runbook: which flag, what has to restart, what you should see, the ordering
 > that matters for the rug pull, and how to put it all back.
+>
+> Want the **Error rate** tile off zero? [`docs/ERROR-DEMOS.md`](docs/ERROR-DEMOS.md)
+> covers which failures count as `outcome=error` and how to cause them.
 
 ### Indirect prompt injection through the RAG corpus
 

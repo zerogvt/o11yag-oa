@@ -61,7 +61,8 @@ def retrieve(question: str):
 
 @task(name="screen_retrieval")
 def screen(hits, ticket_id: str):
-    """Drop retrieved documents that contain instructions, before they are trusted.
+    """ Security screening.
+    Drop retrieved documents that contain instructions, before they are trusted.
 
     This sits between retrieval and the prompt because that is the only point at
     which the text is still identifiable as something the *corpus* said rather
@@ -131,11 +132,14 @@ def answer(body: dict):
     ticket_id = body.get("ticket_id")
     hits, _ = retrieve(question)
 
-    # Screen before grounding is judged, not after: a quarantined document is
-    # not evidence, so the best *usable* score is what the floor below has to be
-    # applied to. Quarantining the top hit can legitimately drop the answer into
-    # the ungrounded path, and that is the correct outcome rather than an edge
-    # case — it is the stack declining to answer off a corpus it cannot trust.
+    # Remove suspicious documents *before* the MIN_SCORE check below, not after.
+    # Otherwise a poisoned document with a high score could get the question
+    # past the check, then be removed, leaving an answer built on weaker
+    # documents that never cleared the bar themselves. So only documents that
+    # survive security screening count towards the check. If the poisoned one was the
+    # best match, what is left may score below MIN_SCORE and the customer gets
+    # the "no policy" reply. That is intended: when the only good match cannot
+    # be trusted, saying "I don't know" beats letting the model guess.
     hits = screen(hits, ticket_id)
     top = hits[0][1] if hits else 0.0
 

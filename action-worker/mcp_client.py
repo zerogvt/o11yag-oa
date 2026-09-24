@@ -57,13 +57,32 @@ def _traced_http_client() -> httpx2.AsyncClient:
     )
 
 
+class MCPUnavailable(Exception):
+    """The MCP server could not be reached: refused, timed out, or answered 5xx."""
+
+
 async def _with_session(fn):
+    """Run fn inside a fresh session, with transport failures made catchable.
+
+    The SDK runs the transport in an anyio TaskGroup, so a refused connection
+    does not arrive as httpx2.ConnectError but as an ExceptionGroup wrapping it.
+    `except httpx2.ConnectError` never matches that. Both shapes become
+    MCPUnavailable here; anything else in a group (a bug, a protocol error) is
+    re-raised untouched, so it is not mistaken for an outage.
+    """
     client = _traced_http_client()
     try:
         async with streamable_http_client(Config.MCP_URL, http_client=client) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 return await fn(session)
+    except httpx2.HTTPError as exc:
+        raise MCPUnavailable(str(exc)) from exc
+    except ExceptionGroup as group:
+        transport, rest = group.split(httpx2.HTTPError)
+        if transport is None or rest is not None:
+            raise
+        raise MCPUnavailable(str(transport.exceptions[0])) from group
     finally:
         await client.aclose()
 

@@ -84,9 +84,9 @@ def invoke(name: str, args: dict, ticket_id: str, customer_id: str):
     try:
         result = mcp_client.call_tool(name, args)
         outcome = "ok"
-    except Exception as exc:
+    except mcp_client.MCPUnavailable as exc:
         span.set_attribute("error", True)
-        span.set_attribute("error.kind", type(exc).__name__)
+        span.set_attribute("error.kind", "mcp_unavailable")
         o11y.tool_called(name, outcome="error", approved=approved)
         return {"error": str(exc)}
 
@@ -180,15 +180,18 @@ def act(body: dict):
 
     try:
         tools = mcp_client.list_tools()
-        span.set_attribute("mcp.tools.available", [t[0] for t in tools])
-        tools = _screen_catalogue(tools, span, ticket_id)
-    except Exception as exc:
-        app.logger.exception("MCP server unreachable")
+    except mcp_client.MCPUnavailable as exc:
+        app.logger.exception("MCP server unreachable: %s", exc)
         span.set_attribute("error.kind", "mcp_unavailable")
         return {"answer": "I can't reach our order system right now.",
                 "outcome": "error", "tokens": 0, "llm_calls": 0}
+    span.set_attribute("mcp.tools.available", [t[0] for t in tools])
+    tools = _screen_catalogue(tools, span, ticket_id)
 
+    # This loop is the agent.
     for step in range(Config.MAX_STEPS):
+        # decide what to do next
+        # the decision won't be executed untill later in invoke()
         decision, step_tokens, decided_by, why = planner.next_step(
             text, tools, history, customer_id)
         tokens += step_tokens
@@ -218,6 +221,7 @@ def act(body: dict):
                 # "mode:rules". Without this the trace shows that the rules
                 # decided but not what the model got wrong.
                 step_span.set_attribute("step.fallback_reason", why)
+            # execute the planned decision
             result = invoke(name, args, ticket_id, customer_id)
 
         history.append({"tool": name, "args": args, "result": result})

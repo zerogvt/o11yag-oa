@@ -8,6 +8,8 @@ agentic architecture. Start here, then read the code in the order below.
 > for prompt injection, tool poisoning and rug-pulled tool definitions.
 > [`SECURITY-DEMOS.md`](SECURITY-DEMOS.md) is the runbook for switching those
 > attacks on and off.
+> [`ERROR-DEMOS.md`](ERROR-DEMOS.md) does the same for failures that push the
+> Error rate tile off zero.
 
 > Function names are used as anchors rather than line numbers, because line
 > numbers rot. `grep -n "def <name>" <file>` will find any of them.
@@ -190,9 +192,29 @@ always genuinely waits for a person. With auto-approve on, the gate proves
 nothing about governance; it is a timer wearing a reviewer's hat. That is stated
 in the README rather than glossed.
 
-The observability point: the wait gets its own span and its own metric. Left
-inside the tool-call span, a reviewer who goes to lunch would make every latency
-percentile in the stack meaningless.
+The observability point: the wait gets its own span and its own metric. Both are
+on the worker's side of the gate, not in this file:
+
+- **span:** `approval_wait`, opened in `action-worker/approvals.py`
+  `request_and_wait()`, carrying `approval.decision`, `.decided_by`, `.waited_ms`
+- **metric:** `o11yag.approval.wait`, a histogram by `tool` and `decision`,
+  recorded through `o11y.approval_waited()` in `action-worker/o11y.py`
+
+Without them the wait is still measured, just inside the wrong numbers. The
+orchestrator is blocked for as long as the reviewer thinks, so every second lands
+in `o11yag.task.latency` (wall clock per ticket), and stretches the agent and
+tool-call spans above it. Take 95 tickets the machine finishes in ~3 s and 5
+refunds a person sits on for ~20 minutes (illustrative figures, not measured):
+
+| | Wait mixed in | Machine time only |
+|---|---|---|
+| mean | ~63 s | ~3 s |
+| p95 / p99 | ~20 min | ~3–4 s |
+
+A latency alert then fires whenever someone takes their time, a model that slows
+from 3 s to 8 s disappears under the outliers, and "why are tickets slow?" has no
+answer. Kept apart, they are two questions for two owners: `o11yag.approval.wait`
+is staffing, and task latency minus it is engineering.
 
 ---
 

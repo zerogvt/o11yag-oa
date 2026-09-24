@@ -61,9 +61,10 @@ def ensure_seeded():
     except Exception as exc:  # noqa: BLE001
         log.warning("seed skipped or failed (may be a benign race): %s", exc)
 
-
+# find the nearest documents in Qdrant
 def search(query: str, k: int):
     """Return [(doc_id, score, text), ...], best first."""
+    # turn the question into a vector (llm.embed)
     hits = _qdrant.query_points(
         collection_name=Config.COLLECTION, query=llm.embed(query), limit=k, with_payload=True
     ).points
