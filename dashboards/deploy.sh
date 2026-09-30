@@ -19,7 +19,7 @@ set -eo pipefail
 OUT="${TMPDIR:-/tmp}/o11yag-deploy.json"
 
 FILE="o11yag.json"
-NAME="o11yag — agent operations"
+NAME="o11yag-oa — agent operations"   # upstream's is "o11yag — agent operations"; keep them distinguishable
 ID_FILE=".dashboard-id"
 ID="${1:-$( [ -f "$ID_FILE" ] && cat "$ID_FILE" )}"
 ID="$(echo "$ID" | tr -d '[:space:]')"   # an empty/whitespace id file must not silently mean "create a new one"
