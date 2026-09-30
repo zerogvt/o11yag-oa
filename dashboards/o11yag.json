@@ -556,6 +556,57 @@
         },
         "enabled": false
       }
+    },
+    "20": {
+      "type": "data",
+      "title": "Who chose each tool call",
+      "description": "One count per executed agent step, split by who picked the tool: `model` (the LLM's own call, accepted) or `fallback` (the deterministic rules), and by `step.fallback_reason` \u2014 what was wrong with the model's answer (`unknown_tool`, `missing:order_id`, `unparseable`, `mode:rules`...). Only steps that ran a tool are counted: a model answering `done` ends the loop without a step span, so it never appears here. With qwen:0.5b, `model ok` is normally absent; its first appearance is the sign a better model is behind the gateway.",
+      "query": "fetch spans\n| filter startsWith(span.name, \"step_\") and isNotNull(step.decided_by)\n| makeTimeseries steps = count(),\n    by: {decided_by = step.decided_by, reason = coalesce(step.fallback_reason, \"model ok\")}",
+      "visualization": "barChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "curve": "smooth",
+          "gapPolicy": "connect",
+          "legend": {
+            "position": "bottom"
+          },
+          "xAxisScaling": "analyzedTimeframe"
+        }
+      },
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "21": {
+      "type": "data",
+      "title": "Refunds: who decided, and what happened",
+      "description": "Every `issue_refund` call, joined to the agent step that chose it and to the CRM's answer in the action-worker's `o11yag.tool.called` audit record. `decided_by`: `fallback` means the rules sent the ticket to the gate, not the model \u2014 governance working, but no evidence the model can decide a refund. `outcome`: `refunded` is money that actually moved. `not sent (gate: timeout|denied)` never reached the CRM \u2014 over AUTO_APPROVE_MAX_EUR with nobody deciding, or refused. `rejected by CRM: already_refunded` was approved by the gate but refused by the system of record, which refunds an order only once; the load generator replays the same ticket, so this row dominates. `approved, no CRM result` means the audit record is missing \u2014 worth investigating. Two joins over spans and logs: keep the range short.",
+      "query": "fetch spans\n| filter gen_ai.tool.name == \"issue_refund\" and span.name == \"mcp_tool_call.tool\"\n| fields trace.id, span.id, span.parent_id, approval.decision\n| join [ fetch spans | filter startsWith(span.name, \"step_\") | fields span.id, trace.id, step.decided_by ],\n    on: {left[span.parent_id] == right[span.id], left[trace.id] == right[trace.id]}, kind: leftOuter\n| fieldsAdd decided_by = coalesce(right.step.decided_by, \"unknown\"), tid = toString(trace.id), sid = toString(span.id)\n| fields tid, sid, decided_by, approval.decision\n| join [ fetch logs | filter audit.event.type == \"o11yag.tool.called\" and audit.tool == \"issue_refund\"\n         | fields audit.trace_id, audit.span_id, audit.result ],\n    on: {left[tid] == right[audit.trace_id], left[sid] == right[audit.span_id]}, kind: leftOuter\n| parse right.audit.result, \"JSON:crm\"\n| fieldsAdd outcome = if(approval.decision != \"approved\", concat(\"not sent (gate: \", approval.decision, \")\"),\n    else: if(crm[ok] == true, \"refunded\",\n    else: if(isNotNull(crm[error]), concat(\"rejected by CRM: \", crm[error]),\n    else: \"approved, no CRM result\")))\n| summarize refunds = count(), by: {decided_by, outcome}\n| sort refunds desc",
+      "visualization": "table",
+      "visualizationSettings": {},
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
     }
   },
   "layouts": {
@@ -639,7 +690,7 @@
     },
     "13": {
       "x": 0,
-      "y": 60,
+      "y": 67,
       "w": 24,
       "h": 5
     },
@@ -677,6 +728,18 @@
       "x": 0,
       "y": 53,
       "w": 24,
+      "h": 7
+    },
+    "20": {
+      "x": 0,
+      "y": 60,
+      "w": 12,
+      "h": 7
+    },
+    "21": {
+      "x": 12,
+      "y": 60,
+      "w": 12,
       "h": 7
     }
   }

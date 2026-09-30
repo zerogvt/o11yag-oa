@@ -5,7 +5,6 @@ telemetry. Emits no telemetry of its own — it is a traffic source, not part of
 the architecture being demonstrated.
 """
 import logging
-import random
 import signal
 import time
 import uuid
@@ -33,7 +32,7 @@ def main():
     log.info("sending to %s every %ss", Config.ORCHESTRATOR_URL, Config.INTERVAL_S)
 
     while _running:
-        customer_id, text = random.choice(tickets.POPULATION)
+        customer_id, text = tickets.pick()
         payload = {"ticket_id": f"TK-{uuid.uuid4().hex[:8]}",
                    "customer_id": customer_id, "tenant": Config.TENANT, "text": text}
         try:

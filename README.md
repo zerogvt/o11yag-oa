@@ -630,9 +630,18 @@ work, and it is worth being exact about which of them you get for free:
   hours of live traffic it produced usable arguments for `lookup_order` **2 times
   out of 51** — mostly passing a customer id as `{"id": "C-7"}` when the tool
   takes `order_id` — and it declared itself finished after a single step in **39
-  of 45 runs**. `issue_refund` was never once attempted, so the approval gate was
-  never exercised. Six runs reached a second step and spent it re-calling the
-  same tool with identical arguments (`agent.loop.repeated`).
+  of 45 runs**. In that window `issue_refund` was never once attempted, so the
+  approval gate was never exercised. Six runs reached a second step and spent it
+  re-calling the same tool with identical arguments (`agent.loop.repeated`).
+
+  **Measured later, the gate does run in `model` mode — but never because of the
+  model.** From 2026-09-20 to 2026-09-30 Dynatrace holds **862** `issue_refund`
+  calls. Every one sits under a step with `step.decided_by = fallback`, and **0**
+  were proposed by the model: at the second step the model named a tool the
+  server doesn't advertise (`step.fallback_reason = unknown_tool`, 860) or
+  returned something unparseable (2), and the rules took over and went on to the
+  refund. 338 were auto-approved (ORD-1001, €89.90); 524 timed out waiting for a
+  person (ORD-1002 and ORD-1004, both over `AUTO_APPROVE_MAX_EUR`).
 
   Two things in the code respond to that, and it matters which does what:
 
@@ -643,10 +652,12 @@ work, and it is worth being exact about which of them you get for free:
   - **`PLANNER_MODE=rules`** skips the model for tool selection entirely. This is
     what makes the refund → approval → gate path reliably demonstrable.
 
-  Validation alone does **not** make refunds happen: a model that answers
-  `{"done": true}` is well-formed and in-contract, so it is still accepted and
-  the loop still ends early. Well-formed is not the same as sensible, and only
-  the second switch addresses that. Never present a `rules` run as model
+  Validation does not make the *model* refund, and it does not make refunds
+  reliable. Whenever the model is overruled at the right step, the rules reach
+  `issue_refund` — that is the 862 above. But a model that answers
+  `{"done": true}` is well-formed and in-contract, so it is accepted and the loop
+  ends early with no refund. Well-formed is not the same as sensible, and only
+  the second switch makes the path happen every time. Never present a `rules` run as model
   reasoning — `step.decided_by` is in the trace precisely so you don't have to
   take anyone's word for it.
 - **LiteLLM is unauthenticated** inside the namespace. The real shape is a virtual
