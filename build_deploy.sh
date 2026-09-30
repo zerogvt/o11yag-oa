@@ -4,16 +4,19 @@ set -eo pipefail
 #   ./build_deploy.sh                  build fresh images and deploy them
 #   ./build_deploy.sh --no-build       redeploy the newest images already built
 #   ./build_deploy.sh --tag 20260917184017   redeploy one specific build
+#   ./build_deploy.sh --no-oneagent    deploy without the DynaKube (uninstrumented)
 
 BUILD=1
+ONEAGENT=1
 TAG=""
 SVCS="orchestrator knowledge-worker action-worker mcp-crm approvals loadgen"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --no-build) BUILD=0 ;;
+    --no-oneagent) ONEAGENT=0 ;;
     --tag)      shift; TAG="$1"; BUILD=0 ;;
-    -h|--help)  sed -n '3,7p' "$0"; exit 0 ;;
+    -h|--help)  sed -n '3,8p' "$0"; exit 0 ;;
     *)          echo "Unknown option: $1" >&2; exit 1 ;;
   esac
   shift
@@ -21,6 +24,54 @@ done
 
 echo " * * * Creating namespace * * * "
 kubectl apply -f k8s/o11yag_ns.yaml
+
+# OneAgent goes in BEFORE any workload, because the operator's webhook injects
+# at pod creation: a pod created before the DynaKube exists stays uninstrumented
+# until it is restarted, and nothing in the deploy output would say so.
+if [ "$ONEAGENT" -eq 1 ]; then
+  echo " * * * Configuring Dynatrace OneAgent * * * "
+  if ! kubectl get crd dynakubes.dynatrace.com >/dev/null 2>&1; then
+    echo "The Dynatrace Operator is not installed (no DynaKube CRD)." >&2
+    echo "Install it first, or pass --no-oneagent to deploy uninstrumented." >&2
+    exit 1
+  fi
+
+  # Same pattern the Collector secret used upstream: keep an existing Secret on
+  # a redeploy, and rewrite it only when tokens are passed in the environment.
+  if [ -z "$DT_API_TOKEN" ] && kubectl get secret o11yag-oa -n dynatrace >/dev/null 2>&1; then
+    echo "Secret o11yag-oa already exists in dynatrace, keeping it"
+  else
+    [ -n "$DT_API_TOKEN" ] || { read -s -p "Enter DT_API_TOKEN: " DT_API_TOKEN; echo; }
+    [ -n "$DT_DATA_INGEST_TOKEN" ] || { read -s -p "Enter DT_DATA_INGEST_TOKEN: " DT_DATA_INGEST_TOKEN; echo; }
+    kubectl create secret generic o11yag-oa \
+      --from-literal=apiToken="$DT_API_TOKEN" \
+      --from-literal=dataIngestToken="$DT_DATA_INGEST_TOKEN" \
+      -n dynatrace --dry-run=client -o yaml | kubectl apply -f -
+  fi
+
+  # The tenant lives in a Secret of its own rather than in the repo. Same rule as
+  # the tokens: kept on a redeploy, rewritten when DT_TENANT is passed in.
+  if [ -z "$DT_TENANT" ] && kubectl get secret o11yag-oa-tenant -n dynatrace >/dev/null 2>&1; then
+    DT_TENANT="$(kubectl get secret o11yag-oa-tenant -n dynatrace -o jsonpath='{.data.tenant}' | base64 -d)"
+  else
+    [ -n "$DT_TENANT" ] || read -p "Enter DT_TENANT (the id before .live.dynatrace.com): " DT_TENANT
+    kubectl create secret generic o11yag-oa-tenant \
+      --from-literal=tenant="$DT_TENANT" \
+      -n dynatrace --dry-run=client -o yaml | kubectl apply -f -
+  fi
+  if ! [[ "$DT_TENANT" =~ ^[a-z0-9]+$ ]]; then
+    echo "DT_TENANT must be the bare tenant id, e.g. abc12345" >&2
+    exit 1
+  fi
+
+  # apiUrl cannot come from a Secret, so the placeholder is filled in here, on
+  # the way to kubectl, and the tenant never touches a tracked file.
+  sed "/^  apiUrl:/ s/DT_TENANT/${DT_TENANT}/" dynatrace/k8s/dynakube.yaml | kubectl apply -f -
+  # The webhook is what injects; the ActiveGate can finish coming up later.
+  kubectl rollout status deployment/dynatrace-webhook -n dynatrace --timeout=180s
+else
+  echo " * * * --no-oneagent: deploying WITHOUT OneAgent, nothing will be instrumented * * * "
+fi
 
 # Stateful/pulled-image infrastructure first: the services below all fail their
 # readiness probes until these are up, and Ollama in particular is slow on a

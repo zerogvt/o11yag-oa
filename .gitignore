@@ -10,3 +10,6 @@ pyvenv.cfg
 .env
 .env.*
 !.env.example
+
+# The Dynatrace UI's generated DynaKube: its Secret holds live tenant tokens.
+*.local.yaml

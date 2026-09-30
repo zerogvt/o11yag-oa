@@ -1,0 +1,84 @@
+# o11yag-oa — Dynatrace Operator DynaKube: OneAgent for this stack only.
+#
+# Trimmed from the one the Dynatrace UI generates, for a single-node kind
+# cluster and a fair comparison with upstream (o11yag-otel):
+#
+#   - Injection is scoped to the o11yag-oa namespace. Unscoped, OneAgent would
+#     also inject into o11yag-otel when both stacks share the cluster, and
+#     duplicate the traces the OTel stack exports itself.
+#   - No telemetryIngest / otelCollector: nothing here speaks OTLP, and an OTel
+#     collector has no place in a OneAgent-only baseline.
+#   - No KSPM, no Live Debugging, and one small ActiveGate instead of four
+#     (6Gi + 3 x 2Gi in the generated file, more than this node has free).
+#
+# Needs the Dynatrace Operator installed first (it creates the dynatrace
+# namespace and the DynaKube CRD), and two Secrets that are NOT kept in the
+# repo, both created by build_deploy.sh: o11yag-oa (the tokens, from
+# DT_API_TOKEN and DT_DATA_INGEST_TOKEN) and o11yag-oa-tenant (from DT_TENANT).
+#
+# The tenant is not written here either. apiUrl cannot be read from a Secret,
+# so DT_TENANT below is a placeholder that build_deploy.sh fills in at apply
+# time. Applied directly with kubectl, it points at a tenant that does not exist.
+#
+# Injection happens when a pod is created, so pods already running when this is
+# applied stay uninstrumented until they are restarted.
+#
+# Field reference:
+# https://docs.dynatrace.com/docs/ingest-from/setup-on-k8s/reference/dynakube-parameters
+apiVersion: dynatrace.com/v1beta6
+kind: DynaKube
+metadata:
+  name: o11yag-oa
+  namespace: dynatrace
+  annotations:
+    # With applicationMonitoring there is no OneAgent on the node, so log
+    # monitoring runs standalone, as its own DaemonSet, and the operator refuses
+    # the DynaKube unless it knows which image that DaemonSet runs. This flag
+    # makes it pull every component (log module, ActiveGate, code modules) from
+    # Dynatrace's public registry, public.ecr.aws/dynatrace, at versions it
+    # picks itself, instead of us pinning a log-module tag in
+    # spec.templates.logMonitoring.imageRef. Checked against operator v1.10.2
+    # (pkg/api/validation/dynakube/logmonitoring.go). With platform tokens
+    # (dt0s16...) the operator uses the public registry anyway and warns that
+    # this flag is ignored. It is kept so the file still validates with classic
+    # API tokens.
+    feature.dynatrace.com/use-public-registry: "true"
+spec:
+  apiUrl: https://DT_TENANT.live.dynatrace.com/api   # filled in by build_deploy.sh
+  # Secret in the dynatrace namespace with keys apiToken and dataIngestToken.
+  tokens: o11yag-oa
+
+  oneAgent:
+    applicationMonitoring:
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: o11yag-oa
+
+  # Picks up container stdout, which is where the audit records go here (one
+  # JSON object per line, see o11y.py). Scoped to this namespace for the same
+  # reason as injection. ingestRuleMatchers is immutable once set: changing it
+  # means deleting and recreating the DynaKube.
+  logMonitoring:
+    ingestRuleMatchers:
+      - attribute: k8s.namespace.name
+        values:
+          - o11yag-oa
+
+  activeGate:
+    # Pinned, because use-public-registry cannot pick an ActiveGate on its own
+    # here: the operator failed with "image discovery failed for activegate: no
+    # matching image in DT API response". On 2026-09-30 the public registry had
+    # 1.347 only as -java17 builds, and 1.345.70 was the newest plain one.
+    # Update this by hand.
+    image: public.ecr.aws/dynatrace/dynatrace-activegate:1.345.70.20260918-003121
+    capabilities:
+      - kubernetes-monitoring   # the Kubernetes app, and required by logMonitoring
+      - routing                 # OneAgent traffic goes through the cluster
+    replicas: 1
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: 1000m
+        memory: 1Gi
