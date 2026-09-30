@@ -6,7 +6,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: o11yag-knowledge-worker-config
-  namespace: o11yag
+  namespace: o11yag-oa
   labels:
     app.kubernetes.io/name: o11yag-knowledge-worker
     app.kubernetes.io/component: knowledge-worker
@@ -17,10 +17,6 @@ data:
   PORT: "8001"
   WEB_CONCURRENCY: "2"
   GUNICORN_TIMEOUT: "300"
-
-  OTEL_ENABLED: "true"
-  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
-  TRACELOOP_TRACE_CONTENT: "false"
 
   LITELLM_URL: "http://litellm:4000/v1"
   CHAT_MODEL: "support-chat"
@@ -73,7 +69,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: o11yag-knowledge-worker
-  namespace: o11yag
+  namespace: o11yag-oa
   labels:
     app.kubernetes.io/name: o11yag-knowledge-worker
     app.kubernetes.io/component: knowledge-worker
@@ -92,7 +88,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: o11yag-knowledge-worker
-  namespace: o11yag
+  namespace: o11yag-oa
   labels:
     app.kubernetes.io/name: o11yag-knowledge-worker
     app.kubernetes.io/component: knowledge-worker
@@ -134,11 +130,12 @@ spec:
               cpu: "500m"
               memory: "512Mi"
           # Startup gate. timeoutSeconds is set EXPLICITLY because it defaults
-          # to 1 second, and one second is not enough: Traceloop pulls in ~40
-          # instrumentation packages and every gunicorn worker does that import
-          # on boot, so /health cannot answer in time and the kubelet kills a
-          # pod that was coming up perfectly well ("Startup probe failed:
-          # context deadline exceeded"). 5s x 36 gives boot three minutes.
+          # to 1 second, and one second was not enough upstream: Traceloop
+          # pulls in ~40 instrumentation packages and every gunicorn worker does
+          # that import on boot, so /health cannot answer in time and the
+          # kubelet kills a pod that was coming up perfectly well ("Startup
+          # probe failed: context deadline exceeded"). Kept as is here: OneAgent
+          # injection adds its own boot cost. 5s x 36 gives boot three minutes.
           startupProbe:
             httpGet:
               path: /health

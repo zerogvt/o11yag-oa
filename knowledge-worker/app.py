@@ -1,9 +1,11 @@
 """o11yag knowledge worker — RAG over the support knowledge base.
 
 Answers policy questions by retrieving from Qdrant and grounding the model on
-what came back. The observability point of this service is retrieval *quality*:
-the scores go on the span and into a metric, so a wrong answer caused by a bad
-retrieval is diagnosable instead of merely visible.
+what came back. The observability point of this service is retrieval *quality*.
+Upstream the scores go on the span and into a metric, so a wrong answer caused
+by a bad retrieval is diagnosable instead of merely visible. Here the span
+attributes are gone with OTel and the metric is a no-op stub; the scores reach
+telemetry only through the audit records.
 """
 from flask import Flask, jsonify, request
 
@@ -12,25 +14,12 @@ from config import Config
 
 app = Flask(__name__)
 
-o11y.init(Config.SERVICE_NAME, Config.OTEL_EXPORTER_OTLP_ENDPOINT,
-          enabled=Config.OTEL_ENABLED, flask_app=app)
-
-try:
-    from traceloop.sdk.decorators import agent, task
-except ImportError:
-    def agent(*a, **k):
-        return lambda f: f
-
-    task = agent
-
-from opentelemetry import trace  # noqa: E402
+o11y.init(Config.SERVICE_NAME)
 
 import judge      # noqa: E402
-import llm        # noqa: E402  (after init, so the OpenAI client is instrumented)
+import llm        # noqa: E402
 import retrieval  # noqa: E402
 import security   # noqa: E402
-
-tracer = trace.get_tracer("o11yag")
 
 REFUSAL = "I don't have a policy that covers that — let me pass you to a colleague."
 
@@ -43,23 +32,14 @@ ANSWER_PROMPT = (
 retrieval.ensure_seeded()
 
 
-@task(name="retrieve")
 def retrieve(question: str):
     hits = retrieval.search(question, Config.TOP_K)
     top = hits[0][1] if hits else 0.0
 
-    # What OpenLLMetry's qdrant span does not tell you: whether this was any good.
-    span = trace.get_current_span()
-    span.set_attribute("rag.hits", len(hits))
-    span.set_attribute("rag.top_score", top)
-    span.set_attribute("rag.doc_ids", [h[0] for h in hits])
-    span.set_attribute("rag.scores", [round(h[1], 4) for h in hits])
-    span.set_attribute("rag.grounded", top >= Config.MIN_SCORE)
     o11y.retrieval_scored(Config.COLLECTION, top, len(hits))
     return hits, top
 
 
-@task(name="screen_retrieval")
 def screen(hits, ticket_id: str):
     """ Security screening.
     Drop retrieved documents that contain instructions, before they are trusted.
@@ -70,19 +50,14 @@ def screen(hits, ticket_id: str):
     indistinguishable from policy, which is the entire mechanism of the attack.
 
     Everything upstream of here reports success while it happens: the document
-    was retrieved on merit, so rag.top_score is high and no span errors.
+    was retrieved on merit, so its score is high and nothing errors.
     """
     clean, detections = security.screen_hits(hits)
-    span = trace.get_current_span()
-    span.set_attribute("security.injection.detected", bool(detections))
     if not detections:
         return hits
 
     quarantine = Config.INJECTION_ACTION == "quarantine"
     action = "quarantined" if quarantine else "observed"
-    span.set_attribute("security.injection.action", action)
-    span.set_attribute("security.injection.kinds", sorted({d["kind"] for d in detections}))
-    span.set_attribute("security.injection.doc_ids", [d["doc_id"] for d in detections])
 
     for d in detections:
         o11y.security_event(kind="prompt_injection", action=action, source="rag_corpus")
@@ -96,28 +71,20 @@ def screen(hits, ticket_id: str):
     return clean if quarantine else hits
 
 
-@task(name="judge_answer")
 def judge_answer(question: str, answer: str, hits):
-    """Grade the answer, on its own span so its latency and cost are separable.
+    """Grade the answer.
 
-    Kept out of generate_answer for the same reason approval_wait is kept out of
-    the tool call: a second model call folded into the first makes every latency
-    number in the service a blend of answering and checking, and there is then no
-    way to say what the quality signal cost.
+    Kept out of generate_answer so upstream can give it its own span, for the
+    same reason approval_wait is kept out of the tool call: a second model call
+    folded into the first makes every latency number in the service a blend of
+    answering and checking, and there is then no way to say what the quality
+    signal cost.
     """
     verdict = judge.grade(question, answer, hits)
-    span = trace.get_current_span()
-    span.set_attribute("quality.verdict", verdict["verdict"])
-    span.set_attribute("quality.decided_by", verdict["decided_by"])
-    span.set_attribute("quality.reason", verdict["reason"])
-    span.set_attribute("quality.judge.mode", Config.JUDGE_MODE)
-    span.set_attribute("quality.judge.model", Config.JUDGE_MODEL)
-    span.set_attribute("quality.judge.tokens", verdict["tokens"])
     o11y.answer_judged(verdict["verdict"], verdict["decided_by"])
     return verdict
 
 
-@task(name="generate_answer")
 def generate(question: str, hits):
     context = "\n\n".join(f"[{doc_id}] {text}" for doc_id, _, text in hits)
     return llm.chat([
@@ -126,7 +93,6 @@ def generate(question: str, hits):
     ])
 
 
-@agent(name="knowledge_worker")
 def answer(body: dict):
     question = str(body.get("text", ""))
     ticket_id = body.get("ticket_id")

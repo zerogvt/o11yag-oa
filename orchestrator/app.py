@@ -4,11 +4,10 @@ Owns the ticket end to end: classifies intent, routes to one worker, and closes
 the workflow with the roll-up nobody gets for free (cost, tokens and LLM calls
 per *resolved ticket*, not per model call).
 
-It is also where request-scoped attribution is set. Traceloop association
-properties attach tenant / customer / ticket to every span the workflow
-produces, including the ones emitted inside the workers, and that is the only
-reason a governance question like "what did we spend on this customer" is
-answerable at all.
+Upstream, this is also where request-scoped attribution is set: Traceloop
+association properties put tenant / customer / ticket on every span the
+workflow produces, workers included. That is OTel code and is gone here. The
+tenant and customer now reach telemetry only through the audit record.
 """
 import re
 import uuid
@@ -21,24 +20,9 @@ from config import Config
 
 app = Flask(__name__)
 
-# Must run before the decorated functions below are called.
-o11y.init(Config.SERVICE_NAME, Config.OTEL_EXPORTER_OTLP_ENDPOINT,
-          enabled=Config.OTEL_ENABLED, flask_app=app)
+o11y.init(Config.SERVICE_NAME)
 
-try:
-    from traceloop.sdk import Traceloop
-    from traceloop.sdk.decorators import task, workflow
-except ImportError:      # telemetry off / SDK absent — keep the service runnable
-    Traceloop = None
-
-    def workflow(*a, **k):
-        return lambda f: f
-
-    task = workflow
-
-from opentelemetry import trace  # noqa: E402
-
-import llm  # noqa: E402  (imported after init so the OpenAI client is instrumented)
+import llm  # noqa: E402
 
 INTENTS = ("question", "order_action", "escalate")
 
@@ -87,7 +71,6 @@ def _heuristic_intent(text: str) -> str:
     return "question"
 
 
-@task(name="classify_intent")
 def classify(text: str):
     try:
         raw, tokens = llm.chat(
@@ -104,26 +87,18 @@ def classify(text: str):
     return _heuristic_intent(text), tokens, "heuristic_fallback"
 
 
-@task(name="delegate_to_worker")
 def delegate(url: str, payload: dict):
-    """One hop to a worker. Trace context rides the requests instrumentation."""
+    """One hop to a worker. Any trace context on it is OneAgent's."""
     r = requests.post(url, json=payload, timeout=Config.WORKER_TIMEOUT_S)
     r.raise_for_status()
     return r.json()
 
 
-@workflow(name="support_ticket")
 def handle(body: dict):
     ticket_id = body.get("ticket_id") or uuid.uuid4().hex[:12]
     customer_id = str(body.get("customer_id", "unknown"))
     tenant = str(body.get("tenant", "acme"))
     text = str(body.get("text", ""))
-
-    # Attribution for every span in this workflow, workers included.
-    if Traceloop is not None:
-        Traceloop.set_association_properties(
-            {"tenant": tenant, "customer_id": customer_id, "ticket_id": ticket_id}
-        )
 
     with o11y.timed() as elapsed:
         intent, tokens, how = classify(text)
@@ -180,15 +155,15 @@ def handle(body: dict):
         **content,
     )
 
-    # The trace id goes back to the caller so that feedback arriving later can
-    # name the trace it is about. Without it the only join is the ticket id, and
-    # a thumbs-down is then a record you can count but not open.
-    ctx = trace.get_current_span().get_span_context()
+    # Upstream returns the trace id here so feedback arriving later can name the
+    # trace it is about. Without the OTel API there is no trace id to read, so
+    # the field stays in the response, empty, and the only join left for
+    # feedback is the ticket id.
     return {"ticket_id": ticket_id, "intent": intent, "outcome": outcome,
             "answer": answer, "tokens": tokens, "llm_calls": llm_calls,
             "cost_usd": round(cost, 6), "latency_ms": round(ms, 1),
             "quality": quality,
-            "trace_id": format(ctx.trace_id, "032x") if ctx.trace_id else ""}
+            "trace_id": ""}
 
 
 @app.post("/chat")
@@ -211,10 +186,9 @@ def feedback_route():
     beside them rather than in a system nobody joins to.
 
     It is a separate request, minutes or days later, on a trace of its own.
-    `subject_trace_id` is what makes it navigable: it is the trace being graded,
-    which the caller got back from /chat. `audit.trace_id` on the same record is
-    this request's trace, and confusing the two is the mistake that makes a
-    feedback store look correct and pivot to nothing.
+    Upstream, `subject_trace_id` names the trace being graded, taken from what
+    /chat returned. Here /chat returns an empty trace id, so the field is
+    normally absent and the ticket id is the only join.
 
     Deliberately unauthenticated and unvalidated beyond the shape, like the rest
     of the stack. In a real deployment the rating has to be attributable, or the

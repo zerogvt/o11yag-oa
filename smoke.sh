@@ -4,13 +4,12 @@ set -eo pipefail
 #
 # This exists because a service can pass every static check — manifests parse,
 # Python compiles, imports look right — and still die on boot because a
-# dependency is missing from requirements.txt. That is not hypothetical: the
-# orchestrator did exactly that, because traceloop-sdk imports httpx without
+# dependency is missing from requirements.txt. That is not hypothetical: upstream,
+# the orchestrator did exactly that, because traceloop-sdk imports httpx without
 # declaring it and nothing else in the stack pulls httpx in any more.
 #
-# Telemetry is OFF here on purpose: this checks that the process starts and
-# answers, not that it can reach a Collector. Run it after build_deploy.sh
-# builds images, before deploying.
+# No OneAgent here: this checks that the process starts and answers. Run it
+# after build_deploy.sh builds images, before deploying.
 #
 # Usage:
 #   ./smoke.sh              use the newest build tag present on all services
@@ -56,10 +55,9 @@ for svc in $SVCS; do
   port="$(port_of $svc)"
   name="o11yag-smoke-${svc}"
   docker rm -f "$name" >/dev/null 2>&1 || true
-  # OTEL off, and every backing service pointed at a dead port: we are testing
+  # Every backing service pointed at a dead port: we are testing
   # that the process boots and serves, not that its dependencies are up.
   docker run -d --name "$name" \
-    -e OTEL_ENABLED=false \
     -e QDRANT_URL=http://127.0.0.1:1 \
     -e REDIS_URL=redis://127.0.0.1:1/0 \
     -e LITELLM_URL=http://127.0.0.1:1/v1 \

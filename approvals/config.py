@@ -24,6 +24,3 @@ class Config:
     # Refunds above this are never auto-approved, so there is always one path
     # through the gate that genuinely stops and waits for a person.
     AUTO_APPROVE_MAX_EUR = float(os.getenv("AUTO_APPROVE_MAX_EUR", "100"))
-
-    OTEL_ENABLED = _bool("OTEL_ENABLED", False)
-    OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")

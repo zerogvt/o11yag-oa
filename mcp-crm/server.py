@@ -3,17 +3,12 @@
 This is the tool side of the architecture: the systems of record the agent is
 allowed to touch, exposed as MCP tools rather than as a bespoke HTTP API.
 
-Two things here are the observability point of the whole service:
+Two things here are the observability point of the whole service upstream:
 
-1. The ASGI middleware, and precisely what is left for it to do. The MCP layer
-   already parents itself: the SDK's own OpenTelemetryMiddleware ships enabled
-   and reads the W3C context out of the JSON-RPC _meta field the client put it
-   in, over any transport, stdio included. What that leaves unparented is the
-   HTTP request carrying it, so without the ASGI middleware added below the
-   inbound POST /mcp arrives with a traceparent header nobody reads and roots a
-   trace of its own. With it, orchestrator -> action worker -> MCP server is one
-   waterfall down to the transport. The client side has to cooperate: see the
-   long note in action-worker/mcp_client.py.
+1. The ASGI middleware that joins the inbound POST /mcp to the caller's trace.
+   It was OTel code and is gone. The MCP SDK's own OpenTelemetryMiddleware is
+   still installed by the SDK, a layer above; see the note in
+   action-worker/mcp_client.py on what that means with no OTel SDK set up.
 
 2. issue_refund writes an audit record. A tool that changes a system of record is
    a business event, and the span alone is the wrong home for it — spans are
@@ -35,7 +30,7 @@ from config import Config
 
 log = logging.getLogger("o11yag.mcp_crm")
 
-o11y.init(Config.SERVICE_NAME, Config.OTEL_EXPORTER_OTLP_ENDPOINT, enabled=Config.OTEL_ENABLED)
+o11y.init(Config.SERVICE_NAME)
 
 # host/port are not constructor arguments in MCP 2.x — uvicorn binds the ASGI
 # app at the bottom of this file instead.
@@ -127,7 +122,7 @@ def update_ticket(ticket_id: str, status: str, note: str = "") -> dict:
 
 
 def build_app():
-    """Streamable-HTTP ASGI app, wrapped so incoming trace context is honoured.
+    """Streamable-HTTP ASGI app.
 
     transport_security is passed explicitly. Leave it None and the SDK allows
     only localhost, which is fine on a laptop and returns 421 for every request
@@ -144,12 +139,6 @@ def build_app():
     log.info("allowed Host headers: %s (dns rebinding protection %s)",
              ", ".join(Config.MCP_ALLOWED_HOSTS) or "<none>",
              "on" if Config.MCP_DNS_REBINDING_PROTECTION else "OFF")
-    if Config.OTEL_ENABLED:
-        # Not the MCP SDK's same-named OpenTelemetryMiddleware, which is already
-        # installed on the server by default and works a layer above this one.
-        from opentelemetry.instrumentation.asgi import OpenTelemetryMiddleware
-
-        app.add_middleware(OpenTelemetryMiddleware)
     return app
 
 

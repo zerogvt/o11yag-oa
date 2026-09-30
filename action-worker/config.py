@@ -50,14 +50,11 @@ class Config:
     # The catalogue fingerprint this worker expects the MCP server to advertise.
     # Left empty, the first catalogue a pod sees becomes its own baseline, which
     # catches a rug pull mid-life and cannot catch a server that was already
-    # poisoned at boot. Pin it — the digest is on the action_worker span as
-    # mcp.tools.digest, and in the pod log at startup — and a server that was
-    # poisoned before this pod ever ran is caught on its first call.
+    # poisoned at boot. Pin it — the digest is in the pod log at startup — and
+    # a server that was poisoned before this pod ever ran is caught on its first
+    # call.
     MCP_TOOLS_DIGEST = os.getenv("MCP_TOOLS_DIGEST", "").strip()
 
     #   redact   blank a flagged tool description before the planner sees it
     #   observe  record the detection and prompt with the description anyway
     TOOL_POISON_ACTION = os.getenv("TOOL_POISON_ACTION", "redact").strip().lower()
-
-    OTEL_ENABLED = _bool("OTEL_ENABLED", False)
-    OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")

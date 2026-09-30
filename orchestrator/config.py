@@ -25,8 +25,6 @@ class Config:
     WORKER_TIMEOUT_S = float(os.getenv("WORKER_TIMEOUT_S", "300"))
 
     # --- telemetry ---
-    OTEL_ENABLED = _bool("OTEL_ENABLED", False)
-    OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
 
     # A local model costs nothing, which makes cost-per-ticket a column of
     # zeroes and the whole cost-attribution story unprovable. So we price the
@@ -37,7 +35,7 @@ class Config:
     COST_PER_1K_TOKENS_USD = float(os.getenv("COST_PER_1K_TOKENS_USD", "0.0002"))
 
     # Audit record content. Off means the record keeps every field except the
-    # customer's words; see the note in o11y.py about why content does not ride
-    # on spans at all.
+    # customer's words. Upstream's o11y.py explains why content goes to the audit
+    # record rather than onto spans.
     AUDIT_LOG_CONTENT = _bool("AUDIT_LOG_CONTENT", True)
     AUDIT_MAX_TEXT_CHARS = int(os.getenv("AUDIT_MAX_TEXT_CHARS", "2000"))

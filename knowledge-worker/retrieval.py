@@ -1,9 +1,10 @@
 """Embedding + vector search against Qdrant, and the one-time seed.
 
-The qdrant client is auto-instrumented by OpenLLMetry, so the search itself
-becomes a span without any code here. What OpenLLMetry does *not* give you is
-whether the search was any good — so search() returns the scores and app.py puts
-them on the span and into a metric. A retrieval that takes 9ms and returns
+Upstream, OpenLLMetry auto-instruments the qdrant client, so the search itself
+becomes a span without any code here; whether OneAgent does the same is one of
+the things to measure. Neither gives you whether the search was any good — so
+search() returns the scores, and upstream's app.py puts them on the span and
+into a metric. Here they only reach the audit records. A retrieval that takes 9ms and returns
 garbage looks identical to a healthy one until you record the score.
 """
 import logging
