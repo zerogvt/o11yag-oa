@@ -16,17 +16,16 @@ agentic architecture. Start here, then read the code in the order below.
 
 ---
 
-## 1. The one idea
+## 1. Basic idea
 
-You already know how APM thinks about a system:
+APM sees a system quite deterministically:
 
 ```
 request → service A → service B → database → response
 ```
 
 **The call graph is fixed.** The same input takes the same path. That single
-assumption is what lets you baseline it, alert on deviation, and say with a
-straight face that a given span is slow.
+assumption is what lets you baseline it, alert on deviation, and say that a given span is slow.
 
 An agent breaks exactly that assumption:
 
@@ -47,7 +46,7 @@ That is the whole conceptual leap. Everything strange about agent observability 
 no baseline to alert against, failures that are silent and semantic, costs you
 cannot predict per request — falls out of that one difference.
 
-**An agent is an LLM in a loop with tools.** Nothing more mystical than that.
+**An agent is an LLM in a loop with tools.** 
 
 ### This is not theoretical here
 
@@ -274,8 +273,7 @@ Then open the trace in Dynatrace and read it top to bottom. Reading one trace
 teaches more in five minutes than the code does in an hour, because you watch the
 loop iterate.
 
-Things to look for, all of which were invisible before the span attributes were
-allow-listed on the tenant:
+Things to look for:
 
 | Attribute | What it tells you |
 |---|---|
@@ -290,9 +288,13 @@ allow-listed on the tenant:
 | `security.injection.detected` | A retrieved document that carried instructions |
 | `mcp.tools.digest` / `.changed` | The tool catalogue's fingerprint, and whether it moved |
 
-To see the governance path — which this stack has still never executed — set
-`PLANNER_MODE: "rules"` on the action-worker ConfigMap and restart it. Then a
-refund reaches the gate, waits, gets approved, and changes the system of record.
+The governance path — a refund reaching the gate, waiting, getting approved, and
+changing the system of record — already runs in `model` mode, but only by
+accident: when the model's step is rejected, the rules take over and go on to
+`issue_refund`. The model itself has never proposed a refund (0 of 862 measured,
+see the README's limits section); when it answers `done` early, no refund
+happens. To see the path on every ticket, set `PLANNER_MODE: "rules"` on the
+action-worker ConfigMap and restart it.
 Set it back to `model` afterwards; `rules` is a demo aid, not an honest default.
 
 ---
