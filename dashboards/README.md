@@ -1,7 +1,16 @@
 # o11yag Dynatrace dashboard
 
-A Dynatrace **platform dashboard** built from the metrics the o11yag services
-emit through OpenLLMetry → OTel Collector → Dynatrace.
+A Dynatrace **platform dashboard**, inherited unchanged from upstream
+(o11yag-otel).
+
+**In this repo most tiles are empty.** The dashboard queries upstream's
+`o11yag.*` business metrics and its custom span attributes. Here the metric
+functions are no-op stubs and the span code is gone (see
+[`docs/TELEMETRY.md`](../docs/TELEMETRY.md)), so those queries match nothing until
+the dashboard is reworked for what OneAgent captures and for the audit records,
+which arrive as JSON lines on stdout. The rest of this page describes the
+dashboard as upstream built it; it is kept because the reasoning behind each tile
+carries over to the rework.
 
 ## Deploy
 
@@ -30,8 +39,9 @@ Two API details that cost a round trip each:
   response nests the metadata under `documentMetadata`, whereas `POST` returns
   it flat.
 
-Every query was validated against the live tenant before the file was written —
-all twelve data tiles returned rows, not just valid syntax.
+Upstream validated every query against the live tenant before the file was
+written — all twelve data tiles returned rows, not just valid syntax. None of that
+holds here: see the note at the top.
 
 The file is also a valid **Dashboards → Upload** import if you would rather do it
 by hand; it is the same top-level `tiles` / `layouts` shape as
@@ -49,9 +59,11 @@ by hand; it is the same top-level `tiles` / `layouts` shape as
 
 ## Why these metrics and not the LLM-call ones
 
-OpenLLMetry already gives you per-call model, token and latency spans for free.
-This dashboard deliberately shows the roll-ups it does **not** give you, because
-those are the ones a person actually asks about:
+LLM instrumentation (OpenLLMetry upstream; here, whatever OneAgent captures)
+gives you per-call model, token and latency data. This dashboard deliberately
+shows the roll-ups it does **not** give you, because those are the ones a person
+actually asks about. Upstream emits them as `o11yag.*` metrics; here they exist
+only as fields on the `o11yag.ticket.handled` audit record:
 
 - **Per resolved ticket, not per LLM call.** Nobody budgets per model call.
 - **Loop depth** (`o11yag.task.llm_calls`) is the headline series. Agent work is
@@ -127,9 +139,9 @@ should display.
   has not been deployed — so their tiles are shape-correct and unproven. Re-check
   them once the stack has run.
 - **No audit-record tiles.** Tool arguments, approval decisions and conversation
-  text are emitted as OTLP **logs**, not metrics, and need the `logs.ingest` scope
-  on the Dynatrace token. Without it the Collector accepts them and Dynatrace
-  returns 403, which is silent unless you read the Collector's own log.
+  text are logs, not metrics, so the dashboard never charted them. Here they are
+  JSON lines on stdout collected by OneAgent log monitoring; whether they arrive
+  as parsed fields is not yet verified (see `docs/TELEMETRY.md`).
 - **Cost is priced, not measured.** `COST_PER_1K_TOKENS_USD` prices tokens as if a
   hosted model were behind LiteLLM. The tiles prove the attribution works; they are
   not a spend figure.

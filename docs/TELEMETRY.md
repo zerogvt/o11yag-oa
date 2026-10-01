@@ -1,129 +1,175 @@
-# Telemetry — who emits what
+# Telemetry — what this repo emits, and what upstream emitted
 
-o11yag's telemetry comes from four sources, and they are easy to confuse because
-they all end up in the same traces and the same Dynatrace tenant. This page says
-which source produces which signal, and where in the code it is set up.
+o11yag-oa is o11yag-otel with the OpenTelemetry code taken out, so that
+Dynatrace OneAgent can be measured on what it finds by itself. That leaves two
+sources of telemetry, and only one of them is this repo's code:
 
 | Source | What it is | Set up in |
 |---|---|---|
-| **OpenLLMetry** | `traceloop-sdk` — auto-instruments the OpenAI client (every LLM call through LiteLLM) and the Qdrant client, and provides the `@workflow` / `@agent` / `@task` / `@tool` decorators | `Traceloop.init()`, `<service>/o11y.py:89` |
-| **OpenTelemetry (ours)** | The OTel SDK used directly: our business metrics, the audit log records, and hand-made spans and span attributes | `<service>/o11y.py:68-82`; spans in the service code |
-| **HTTP instrumentors** | OTel contrib packages that patch an HTTP library: `requests` (outbound), `httpx` (Qdrant only), Flask (inbound), ASGI (inbound, MCP server only) | `<service>/o11y.py:118-133`; ASGI at `mcp-crm/server.py:150-152` |
-| **MCP SDK** | The `mcp` Python SDK's built-in OTel support, on by default — nothing to configure | none in our code; it ships enabled |
+| **Audit records** | One JSON object per line on stdout, written by `o11y.audit(...)`. The only telemetry the services produce themselves. | `<service>/o11y.py` (`audit`) |
+| **OneAgent** | Injected into every pod in the `o11yag-oa` namespace by the Dynatrace Operator. Whatever traces, LLM spans, service metrics and logs it captures. | `dynatrace/k8s/dynakube.yaml` |
 
-All four write to **one** set of OTel providers, so they share trace ids and one
-exporter: OTLP/HTTP to the collector (`collector/k8s/o11yag-collector.yaml`),
-which forwards to Dynatrace. `o11y.py` is the same file copied into every
-service.
+Everything else on this page is the comparison: what upstream emits, and what has
+become of each signal here. **What OneAgent actually captures has not yet been
+measured.** Where a row says "OneAgent: not yet measured", that is the honest
+state, not a placeholder for "probably yes".
 
-## How they fit together
+## What this repo emits
 
-OpenLLMetry is not a separate telemetry system — it *is* OpenTelemetry.
-`Traceloop.init()` installs an ordinary OTel tracer provider with an OTLP
-exporter, and everything else attaches to it.
+### Audit records
 
-One ordering rule holds it together (`o11y.py:58-66`): **our meter provider is
-installed before `Traceloop.init()`.** OTel refuses to replace a provider once
-one is set, so whichever goes first wins. Ours goes first, which means
-OpenLLMetry's `gen_ai.*` metrics are exported through our meter provider too.
-The warning `Overriding of current MeterProvider is not allowed` in the logs is
-this working as intended.
+`o11y.audit(event_type, **fields)` writes one line to stdout through its own
+logging handler, so each line parses as a single JSON object:
 
-## Metrics sent to Dynatrace
-
-Measured on tenant `nzu34348` on 2026-09-30: these are the metric keys the
-tenant received from the `o11yag_*` services, not a list read off the code.
-The **MCP SDK emits no metrics** — spans only — so no row has MCP as its
-source.
-
-Type and unit for our metrics come from `o11y.py`. For the library metrics
-(OpenLLMetry, HTTP) they are what the OpenTelemetry semantic conventions
-specify, and were **not** checked against the tenant.
-
-| Metric | Type · unit | Source | Emitted by | Dimensions | What it answers |
-|---|---|---|---|---|---|
-| `o11yag.tasks` | counter · 1 | OpenTelemetry (ours) | orchestrator | `intent`, `tenant`, `outcome` | Tickets handled, and how each ended (`ok`, `blocked`, `escalated`, `incomplete`, `error`) |
-| `o11yag.task.latency` | histogram · ms | OpenTelemetry (ours) | orchestrator | `intent`, `tenant` | Wall clock per ticket, including any human approval wait |
-| `o11yag.task.llm_calls` | histogram · 1 | OpenTelemetry (ours) | orchestrator | `intent`, `tenant` | LLM calls per ticket — the loop-depth signal |
-| `o11yag.task.tokens` | counter · 1 | OpenTelemetry (ours) | orchestrator | `intent`, `tenant` | Tokens per ticket, rolled up across every hop |
-| `o11yag.task.cost.usd` | counter · usd | OpenTelemetry (ours) | orchestrator | `intent`, `tenant` | Cost per ticket. **Priced, not measured** — see the README's limits |
-| `o11yag.approval.wait` | histogram · ms | OpenTelemetry (ours) | action-worker | `tool`, `decision` | Time spent waiting at the approval gate |
-| `o11yag.tool.calls` | counter · 1 | OpenTelemetry (ours) | action-worker | `tool`, `outcome`, `approved` | MCP tool calls, and whether the gate let them through |
-| `o11yag.retrieval.top_score` | histogram · 1 | OpenTelemetry (ours) | knowledge-worker | `collection` | Best similarity score — did retrieval find anything relevant |
-| `o11yag.retrieval.hits` | histogram · 1 | OpenTelemetry (ours) | knowledge-worker | `collection` | Chunks returned |
-| `o11yag.answer.quality` | counter · 1 | OpenTelemetry (ours) | knowledge-worker | `verdict`, `decided_by` | Answers graded for groundedness, and whether the judge model or the heuristic decided |
-| `o11yag.security.events` | counter · 1 | OpenTelemetry (ours) | knowledge-worker, action-worker | `kind`, `action`, `source` | Adversarial content found in agent input (`prompt_injection`, `tool_poisoning`, `tool_catalogue_changed`) |
-| `o11yag.feedback` | counter · 1 | OpenTelemetry (ours) | orchestrator | `rating`, `intent`, `tenant` | Human ratings of an answer. Only sent when someone posts feedback — **not present on the tenant when this was measured** |
-| `gen_ai.client.token.usage` | histogram · tokens | OpenLLMetry | orchestrator, knowledge-worker, action-worker | set by the library, incl. `gen_ai.token.type` (`input` / `output`) | Tokens per LLM call |
-| `gen_ai.client.operation.duration` | histogram · s | OpenLLMetry | orchestrator, knowledge-worker, action-worker | set by the library | Latency per LLM call |
-| `gen_ai.client.generation.choices` | counter · 1 | OpenLLMetry | orchestrator, knowledge-worker, action-worker | set by the library | Completions returned per LLM call |
-| `llm.openai.embeddings.vector_size` | counter · 1 | OpenLLMetry | knowledge-worker | set by the library | Embedding vector size (embedding calls for retrieval) |
-| `http.server.duration` | histogram · ms | HTTP (Flask; ASGI for mcp-crm) | all five services | set by the library | Inbound request latency |
-| `http.server.active_requests` | up-down counter · 1 | HTTP (Flask; ASGI for mcp-crm) | all five services | set by the library | Requests in flight |
-| `http.server.request.size` | histogram · By | HTTP (ASGI) | mcp-crm | set by the library | Inbound request body size |
-| `http.client.duration` | histogram · ms | HTTP (`requests` / `httpx`) | orchestrator, knowledge-worker, action-worker | set by the library | Outbound request latency: service-to-service calls, approval polling, Qdrant |
-
-Two things the table implies:
-
-- **Per call vs per ticket.** OpenLLMetry's `gen_ai.*` metrics are per LLM call.
-  Nobody budgets per call, so `o11yag.task.*` rolls the same work up per
-  resolved ticket — that roll-up is the reason our metrics exist
-  (`o11y.py`, `task_finished`).
-- **No `http.client.*` from the MCP hop.** The MCP SDK sends its HTTP through
-  `httpx2`, which the `httpx` instrumentor does not patch. The MCP hop shows up
-  as spans (below), not as HTTP client metrics.
-
-To re-check the list against the tenant:
-
-```
-metrics
-| filter startsWith(metric.key, "o11yag") or startsWith(metric.key, "gen_ai")
-      or startsWith(metric.key, "llm") or startsWith(metric.key, "http.")
-| summarize series = count(), by: {metric.key}
+```json
+{"audit.event.type": "o11yag.ticket.handled", "audit.schema.version": "1", "audit.ticket_id": "TK-4059b4c0", "audit.intent": "question", ...}
 ```
 
-## Spans
+- `audit.event.type` and `audit.schema.version` (currently `"1"`) are always present.
+- Every other field is `audit.<name>`. Fields passed as `None` are left out.
+- Strings, numbers and booleans are written as they are; anything else (lists,
+  dicts — tool arguments, CRM results, doc ids) is JSON-encoded into a string.
+- **There is no `audit.trace_id` or `audit.span_id`.** Upstream reads them off the
+  active OTel span; with no OTel here there is no span to read.
 
-| Source | Example span | Where |
+They are meant to be collected by OneAgent log monitoring, which the DynaKube
+scopes to this namespace. Customer text and tool arguments go here and nowhere
+else.
+
+| Event type | Emitted by | What it records |
 |---|---|---|
-| OpenLLMetry — decorators | `mcp_tool_call.tool` (with `gen_ai.tool.name`, `gen_ai.tool.call.arguments`) | `@tool_span(name="mcp_tool_call")`, `action-worker/app.py:60` |
-| OpenLLMetry — auto-instrumentation | the LLM call spans (model, tokens), the Qdrant query spans | nothing in our code; `Traceloop.init()` |
-| OpenTelemetry (ours) | `step_N` (`step.decided_by`, `step.fallback_reason`), `approval_wait` | `tracer.start_as_current_span`, `action-worker/app.py:215`, `action-worker/approvals.py:20` |
-| HTTP instrumentors | a CLIENT span per `requests.post` (e.g. orchestrator → worker, `orchestrator/app.py:110`), a SERVER span per inbound Flask request, `POST /mcp` on the MCP server | `o11y.py:118-133`, `mcp-crm/server.py:150-152` |
-| MCP SDK | `MCP send tools/call` (client), `tools/call issue_refund` (server, scope `mcp-python-sdk`) | nothing in our code; ships enabled |
+| `o11yag.ticket.handled` | orchestrator | The per-ticket roll-up: intent and who decided it (`intent_source`), outcome, quality verdict, latency, LLM calls, tokens, cost, and the prompt/response unless `AUDIT_LOG_CONTENT=false` |
+| `o11yag.feedback.received` | orchestrator | A human rating posted to `/feedback` |
+| `o11yag.answer.generated` | knowledge-worker | The answer, the doc ids it was grounded on, top score, tokens, the judge's verdict and who decided it |
+| `o11yag.answer.withheld` | knowledge-worker | An answer the judge marked unsupported and that was replaced with the refusal |
+| `o11yag.retrieval.ungrounded` | knowledge-worker | A question refused because retrieval found nothing above `MIN_SCORE` |
+| `o11yag.security.injection_detected` | knowledge-worker | A retrieved document that contained instructions |
+| `o11yag.tool.called` | action-worker | An MCP tool call, its arguments, the CRM's result, and the approval state |
+| `o11yag.tool.blocked` | action-worker | A consequential tool call the approval gate did not let through |
+| `o11yag.security.tool_poisoned` | action-worker | A tool description that contained instructions |
+| `o11yag.security.tool_catalogue_changed` | action-worker | The MCP tool catalogue no longer matching its pinned or first-seen digest |
+| `o11yag.approval.requested` | approvals | A request arriving at the gate |
+| `o11yag.approval.decided` | approvals | The decision, who made it (`human` or `auto-approver`) and how long it waited |
+| `o11yag.crm.refund_issued` | mcp-crm | A refund written to the system of record |
 
-**Trace context crosses the MCP hop two ways.** The MCP SDK puts it in the
-JSON-RPC `_meta` field, which joins the MCP spans to the trace. It does not
-join the HTTP request that carries them, so the repo adds that by hand: an
-`httpx2` event hook injects `traceparent` on the client
-(`action-worker/mcp_client.py:48-57`), and the ASGI middleware reads it on the
-server. `mcp-crm/server.py` and `action-worker/mcp_client.py` explain this at
-the top of each file.
+The list comes from the `o11y.audit(` calls in `*/app.py` and `mcp-crm/server.py`.
 
-**Prompts and completions are not on spans.** OpenLLMetry records them on
-spans by default; the ConfigMaps set `TRACELOOP_TRACE_CONTENT=false` because
-in a support flow that is customer data in the trace store.
+### Nothing else
 
-## Logs
+- The business-metric functions in `o11y.py` (`task_finished`, `tool_called`, ...)
+  are **no-ops**. They keep upstream's names so the service code reads the same.
+- `/chat` still returns `trace_id`, and it is always `""`.
+- `opentelemetry-api` is still installed, as a hard dependency of `mcp` 2.x, and
+  the MCP SDK calls it internally. With no OTel SDK configured those calls record
+  nothing — unless OneAgent picks them up, which is one of the things to measure.
 
-The logs sent to Dynatrace are our own **audit records** (OpenTelemetry, ours).
-They are written with `o11y.audit(...)` and carry `audit.event.type`,
-`audit.trace_id` / `audit.span_id` and the event's fields:
+### Finding the audit records
 
-| Area | Event types |
-|---|---|
-| Tool calls | `o11yag.tool.called` (with the CRM's `audit.result`), `o11yag.tool.blocked` |
-| Approval gate | `o11yag.approval.requested`, `o11yag.approval.decided` |
-| System of record | `o11yag.crm.refund_issued` |
-| Answers | `o11yag.answer.generated`, `o11yag.answer.withheld`, `o11yag.retrieval.ungrounded` |
-| Feedback | `o11yag.feedback.received` |
-| Security | `o11yag.security.injection_detected`, `o11yag.security.tool_poisoned`, `o11yag.security.tool_catalogue_changed` |
+```
+fetch logs
+| filter k8s.namespace.name == "o11yag-oa"
+| filter contains(content, "audit.event.type")
+```
 
-They exist because spans are the wrong home for "did we refund this customer":
-spans are sampled and expire with trace retention. Customer text and tool
-arguments go here instead of onto spans. The dashboard's refunds tile joins
-these records to the spans by trace and span id to show what the CRM actually
-did.
+This matches on the raw line on purpose. **Whether OneAgent log monitoring and
+Grail parse the JSON into fields has not been verified**, so a query that filters
+on `audit.event.type` as a field may return nothing even while the records arrive.
 
-Container stdout/stderr is **not** shipped: the collector only has an `otlp`
-receiver, so anything a process prints to the console is gone with its pod.
+## What upstream emits, and its status here
+
+Upstream (o11yag-otel) instruments its five app services with OpenLLMetry
+(`traceloop-sdk`), the OpenTelemetry SDK, OTel HTTP instrumentors and the MCP
+SDK's own OTel support, and exports all of it over OTLP through an OTel Collector.
+None of that is in this repo. The tables below are upstream's inventory, kept as
+the checklist for what OneAgent does and does not recover.
+
+Two differences in coverage to keep in mind when comparing:
+
+- **OneAgent is injected into every pod in the namespace**, including loadgen,
+  LiteLLM, Ollama, Qdrant and Redis. Upstream instruments only orchestrator,
+  knowledge-worker, action-worker, mcp-crm and approvals. OneAgent may therefore
+  show things upstream never had, such as the loadgen → orchestrator call.
+- **The injected OneAgent code modules are 1.347.49.** Dynatrace documents 1.339
+  as the minimum for capturing OpenAI-SDK LLM calls, so the version is not the
+  obstacle; whether it captures them here is still to be measured.
+
+### Metrics
+
+Upstream's list was measured on the shared tenant on 2026-09-30.
+
+| Metric | Upstream source | Emitted by (upstream) | What it answers | Status here |
+|---|---|---|---|---|
+| `o11yag.tasks` | OTel SDK (ours) | orchestrator | Tickets handled, by `intent`, `tenant`, `outcome` | **gone** (no-op stub). Outcome and intent are in `o11yag.ticket.handled` |
+| `o11yag.task.latency` | OTel SDK (ours) | orchestrator | Wall clock per ticket | **gone** (no-op stub). `latency_ms` in `o11yag.ticket.handled` |
+| `o11yag.task.llm_calls` | OTel SDK (ours) | orchestrator | LLM calls per ticket — the loop-depth signal | **gone** (no-op stub). `llm_calls` in `o11yag.ticket.handled` |
+| `o11yag.task.tokens` | OTel SDK (ours) | orchestrator | Tokens per ticket | **gone** (no-op stub). `tokens` in `o11yag.ticket.handled` |
+| `o11yag.task.cost.usd` | OTel SDK (ours) | orchestrator | Cost per ticket (priced, not measured) | **gone** (no-op stub). `cost_usd` in `o11yag.ticket.handled` |
+| `o11yag.approval.wait` | OTel SDK (ours) | action-worker | Time waiting at the approval gate | **gone** (no-op stub). `waited_s` in `o11yag.approval.decided` |
+| `o11yag.tool.calls` | OTel SDK (ours) | action-worker | MCP tool calls and whether the gate let them through | **gone** (no-op stub). One `o11yag.tool.called` / `.blocked` record per call |
+| `o11yag.retrieval.top_score` | OTel SDK (ours) | knowledge-worker | Best similarity score | **gone** (no-op stub). `top_score` in `o11yag.answer.generated` / `.retrieval.ungrounded` |
+| `o11yag.retrieval.hits` | OTel SDK (ours) | knowledge-worker | Chunks returned | **gone** (no-op stub). `hits` only in `o11yag.retrieval.ungrounded` |
+| `o11yag.answer.quality` | OTel SDK (ours) | knowledge-worker | Groundedness verdicts, by `verdict` and `decided_by` | **gone** (no-op stub). `quality_verdict` / `quality_decided_by` in `o11yag.answer.generated` |
+| `o11yag.security.events` | OTel SDK (ours) | knowledge-worker, action-worker | Adversarial content in agent input | **gone** (no-op stub). One `o11yag.security.*` record per detection |
+| `o11yag.feedback` | OTel SDK (ours) | orchestrator | Human ratings of an answer | **gone** (no-op stub). `o11yag.feedback.received` |
+| `gen_ai.client.token.usage` | OpenLLMetry | orchestrator, knowledge-worker, action-worker | Tokens per LLM call | OneAgent: not yet measured |
+| `gen_ai.client.operation.duration` | OpenLLMetry | orchestrator, knowledge-worker, action-worker | Latency per LLM call | OneAgent: not yet measured |
+| `gen_ai.client.generation.choices` | OpenLLMetry | orchestrator, knowledge-worker, action-worker | Completions per LLM call | OneAgent: not yet measured |
+| `llm.openai.embeddings.vector_size` | OpenLLMetry | knowledge-worker | Embedding vector size | OneAgent: not yet measured |
+| `http.server.duration` | OTel HTTP (Flask; ASGI for mcp-crm) | all five services | Inbound request latency | OneAgent: not yet measured (OneAgent has its own service metrics, under different keys) |
+| `http.server.active_requests` | OTel HTTP (Flask; ASGI for mcp-crm) | all five services | Requests in flight | OneAgent: not yet measured |
+| `http.server.request.size` | OTel HTTP (ASGI) | mcp-crm | Inbound request body size | OneAgent: not yet measured |
+| `http.client.duration` | OTel HTTP (`requests` / `httpx`) | orchestrator, knowledge-worker, action-worker | Outbound request latency | OneAgent: not yet measured |
+
+The twelve `o11yag.*` series are the loss that is certain: no agent can recover a
+business metric that the code never computes. Their values survive only as fields
+on the audit records, so any chart of them here has to be built from logs.
+
+### Spans
+
+| Upstream span | Upstream source | Status here |
+|---|---|---|
+| `support_ticket` workflow, `classify_intent`, `delegate_to_worker` tasks (orchestrator) | OpenLLMetry decorators | **gone** (decorators removed) |
+| `knowledge_worker` agent; `retrieve`, `screen_retrieval`, `generate_answer`, `judge_answer` tasks | OpenLLMetry decorators | **gone** (decorators removed) |
+| `action_worker` agent; `mcp_tool_call.tool` | OpenLLMetry decorators | **gone** (decorators removed) |
+| `step_N` (`step.decided_by`, `step.fallback_reason`), `approval_wait` | OTel SDK (ours) | **gone** (span code removed) |
+| LLM call spans (model, tokens) through the OpenAI client | OpenLLMetry auto-instrumentation | OneAgent: not yet measured |
+| Qdrant query spans | OpenLLMetry auto-instrumentation | OneAgent: not yet measured |
+| CLIENT span per `requests` call, SERVER span per inbound Flask request, `POST /mcp` on the MCP server | OTel HTTP instrumentors | OneAgent: not yet measured |
+| `MCP send tools/call` (client), `tools/call <tool>` (server) | MCP SDK's built-in OTel | Still called by the SDK through `opentelemetry-api`; records nothing without an OTel SDK. Whether OneAgent captures them: not yet measured |
+
+**Trace context across the MCP hop.** Upstream joins the action-worker and the
+MCP server into one trace two ways: the MCP SDK writes the context into the
+JSON-RPC `_meta` field, and an `httpx2` event hook in `action-worker/mcp_client.py`
+writes a `traceparent` header that an ASGI middleware on the server reads. The
+hook and the middleware are gone here. Whether the hop is one trace now depends
+on OneAgent seeing `httpx2` on the client and uvicorn on the server — not yet
+measured.
+
+### Span attributes
+
+| Upstream attribute | Set on | Status here |
+|---|---|---|
+| `traceloop.association.properties.*` (tenant, customer_id, ticket_id) | every span of a ticket, workers included | **gone**. Tenant and customer reach telemetry only through `o11yag.ticket.handled` |
+| `gen_ai.tool.name`, `gen_ai.tool.call.arguments`, `mcp.server`, `mcp.transport` | `mcp_tool_call` | **gone** (tool and args are in `o11yag.tool.called`) |
+| `approval.required`, `approval.decision`, `approval.id`, `approval.decided_by`, `approval.waited_ms` | `mcp_tool_call`, `approval_wait` | **gone** (in `o11yag.approval.decided`) |
+| `step.index`, `step.decided_by`, `step.fallback_reason` | `step_N` | **gone**, with no audit replacement. Who decided each agent step is no longer recorded anywhere |
+| `agent.loop.steps`, `agent.loop.max_steps`, `agent.loop.repeated`, `agent.loop.terminated` | `action_worker` | **gone**. `steps`, `repeated_calls`, `terminated` are only in the `/act` response, which nothing records |
+| `mcp.tools.available`, `mcp.tools.digest`, `mcp.tools.baseline`, `mcp.tools.changed`, `mcp.tools.digest.expected` | `action_worker` | **gone**. When unpinned, the first digest a pod sees is logged once; a change is in `o11yag.security.tool_catalogue_changed` |
+| `security.tool_poisoning.*`, `security.injection.*` | `action_worker`, `screen_retrieval` | **gone** (detections are in the `o11yag.security.*` records) |
+| `rag.hits`, `rag.top_score`, `rag.doc_ids`, `rag.scores`, `rag.grounded` | `retrieve` | **gone** (top score and doc ids are in `o11yag.answer.generated`) |
+| `quality.verdict`, `quality.decided_by`, `quality.reason`, `quality.judge.*` | `judge_answer` | **gone** (verdict, decider and reason are in `o11yag.answer.generated`) |
+| `error.kind` (`mcp_unavailable`) | `action_worker`, `mcp_tool_call` | **gone** |
+| `o11yag.audit.sink_error` | the active span, when an audit write failed | **gone**; the failure is a warning in the pod log |
+
+### Logs
+
+Upstream sends the audit records as OTLP log records with the fields above as
+attributes, plus `audit.trace_id` / `audit.span_id`, and ships nothing from
+container stdout. Here it is the reverse: the records are stdout lines, with no
+trace or span id. That breaks upstream's join between a refund's span and its
+`o11yag.tool.called` record, which the dashboard's refunds tile depends on.
+
+**Prompts and completions.** Upstream keeps them off spans
+(`TRACELOOP_TRACE_CONTENT=false`) and puts them in the audit records. Here they
+are still in the audit records. Whether OneAgent's LLM capture records prompt
+text on spans, and whether that is off by default, is not yet measured.
