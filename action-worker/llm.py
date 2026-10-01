@@ -1,7 +1,8 @@
 """Thin wrapper over the model gateway.
 
-OpenAI protocol to LiteLLM, never Ollama directly — it is what OpenLLMetry
-auto-instruments, and it keeps the backend a gateway config change.
+OpenAI protocol to LiteLLM, never Ollama directly — it is what LLM
+instrumentation targets (see orchestrator/llm.py), and it keeps the backend a
+gateway config change.
 """
 from openai import OpenAI
 

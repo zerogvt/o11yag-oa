@@ -1,58 +1,39 @@
 """MCP client for the CRM server, over Streamable HTTP.
 
-TRACE CONTEXT TRAVELS BY TWO ROUTES HERE, and the difference between them is the
-interesting part.
+TRACE CONTEXT. Upstream carries it across this hop by two routes: the MCP SDK's
+own OTel instrumentation writes it into each JSON-RPC request's `_meta` field,
+and an httpx2 event hook here writes a `traceparent` header for the server's
+ASGI middleware. The hook and the middleware were OTel code and are gone. The
+SDK's own instrumentation is not ours to remove: it ships inside `mcp` and calls
+the OTel API, which stays installed as a dependency of `mcp`. With no OTel SDK
+configured those calls record nothing — unless OneAgent picks them up, which is
+one of the questions this repo exists to answer.
 
-The MCP layer propagates itself, and costs us nothing. The SDK's dispatcher opens
-a CLIENT span per outbound request — these are the `MCP send <method>` spans in
-the waterfall — and injects the W3C context into that request's JSON-RPC `_meta`
-field (SEP-414). The server's own OpenTelemetryMiddleware, which ships enabled,
-reads it back. Because the carrier is `_meta` and not a header, this works over
-stdio as well; trace continuity across MCP is not a property of the transport.
-
-The HTTP layer underneath does not propagate itself. The obvious approach — add
-opentelemetry-instrumentation-httpx and let it handle it — does nothing with this
-SDK, because MCP 2.x makes its HTTP calls through `httpx2`, a different package
-from `httpx`, so the httpx instrumentation never sees them. Hence the event hook
-below, which writes the current W3C context onto every outgoing request for the
-MCP server's ASGI middleware to pick up.
-
-Be exact about what that second route buys, because it is narrower than it looks:
-the tool call itself would land in the ticket's trace either way, over `_meta`.
-The hook is what keeps the transport spans — `POST /mcp`, and the session's
-`DELETE /mcp` — inside that trace instead of each rooting a trace of its own. The
-symptom of dropping it is quietly wrong rather than broken: every call succeeds
-and nothing reports an error.
+Whether the MCP hop still appears as one trace is therefore down to OneAgent
+seeing httpx2 on this side and uvicorn on the server.
 
 SIMPLIFICATION: a session is opened and torn down per call. A real agent holds
 one session for a whole conversation, so this adds an initialize round trip to
-every tool call and inflates the tool latency you see in the trace. It is done
-this way because Flask is synchronous and the MCP SDK is async — keeping a
-session alive across requests means an event loop with a lifetime of its own.
+every tool call and inflates the tool latency. It is done this way because
+Flask is synchronous and the MCP SDK is async — keeping a session alive across
+requests means an event loop with a lifetime of its own.
 """
 import asyncio
 import json
 
 # httpx2 — the HTTP client the MCP SDK uses internally. Pulled in as a direct
-# dependency here only so we can hand the transport a client of our own.
+# dependency here only so we can hand the transport a client with our timeouts.
 import httpx2
 # mcp — official Model Context Protocol Python SDK (2.x).
 # https://github.com/modelcontextprotocol/python-sdk
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
-from opentelemetry.propagate import inject
 
 from config import Config
 
 
-def _traced_http_client() -> httpx2.AsyncClient:
-    async def _inject_context(request):
-        carrier = {}
-        inject(carrier)          # writes traceparent (and tracestate if present)
-        request.headers.update(carrier)
-
+def _http_client() -> httpx2.AsyncClient:
     return httpx2.AsyncClient(
-        event_hooks={"request": [_inject_context]},
         timeout=httpx2.Timeout(Config.MCP_TIMEOUT_S, read=Config.MCP_TIMEOUT_S),
     )
 
@@ -70,7 +51,7 @@ async def _with_session(fn):
     MCPUnavailable here; anything else in a group (a bug, a protocol error) is
     re-raised untouched, so it is not mistaken for an outage.
     """
-    client = _traced_http_client()
+    client = _http_client()
     try:
         async with streamable_http_client(Config.MCP_URL, http_client=client) as (read, write):
             async with ClientSession(read, write) as session:

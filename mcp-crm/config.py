@@ -31,8 +31,8 @@ class Config:
     MCP_ALLOWED_HOSTS = _list(
         "MCP_ALLOWED_HOSTS",
         "o11yag-mcp-crm:*,"
-        "o11yag-mcp-crm.o11yag:*,"
-        "o11yag-mcp-crm.o11yag.svc.cluster.local:*,"
+        "o11yag-mcp-crm.o11yag-oa:*,"
+        "o11yag-mcp-crm.o11yag-oa.svc.cluster.local:*,"
         # kubectl port-forward, for the debug commands in the README
         "localhost:*,127.0.0.1:*",
     )
@@ -52,6 +52,3 @@ class Config:
     # Turning it on after the worker has run is the rug pull — the digest the
     # worker recorded no longer matches, which is the point of recording it.
     POISON_TOOL_DESCRIPTION = _bool("POISON_TOOL_DESCRIPTION", False)
-
-    OTEL_ENABLED = _bool("OTEL_ENABLED", False)
-    OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")

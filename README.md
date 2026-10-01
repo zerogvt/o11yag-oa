@@ -1,5 +1,27 @@
 # o11yag
 
+> **This is o11yag-oa, the OneAgent variant.** It is the same system as
+> [o11yag-otel](https://github.com/zerogvt/o11yag-otel), with all the
+> OpenLLMetry/OpenTelemetry code removed, so that Dynatrace OneAgent can be
+> measured on what it finds by itself. The rest of this README and `docs/`
+> describe upstream, the OTel build. What differs here:
+>
+> - **No in-process telemetry.** No Traceloop, no OTel SDK or instrumentation
+>   packages, no Collector, no OTLP. Traces are whatever OneAgent injects.
+> - **`*/o11y.py` is a stub** that keeps upstream's function names. The twelve
+>   `o11yag.*` business metrics are no-ops. Audit records go to stdout as one
+>   JSON object per line, for OneAgent log monitoring, and carry no trace id.
+> - **Custom span attributes, the agent/tool/step spans and the MCP trace-context
+>   hook are gone.** `/chat` still returns `trace_id`, but it is always empty.
+> - **Still present:** `opentelemetry-api`, as a hard dependency of `mcp` 2.x.
+>   The MCP SDK calls it internally. With no SDK configured those calls record
+>   nothing, unless OneAgent picks them up; whether it does is something to measure.
+> - **The dashboard** still queries upstream's metrics and span attributes, so
+>   most of its tiles will be empty until it is reworked.
+>
+> [`docs/TELEMETRY.md`](docs/TELEMETRY.md) lists everything upstream emits,
+> which is the checklist for what OneAgent does and does not recover.
+
 A minimal, runnable reference architecture for the way enterprises actually build
 LLM agents today — instrumented with [OpenLLMetry](https://github.com/traceloop/openllmetry)
 and exported to Dynatrace, with the telemetry aimed specifically at the questions
@@ -249,8 +271,8 @@ in it.
 
 5. **Watch it work**:
    ```
-   kubectl get pods -n o11yag -w
-   kubectl logs -l app.kubernetes.io/name=o11yag-loadgen -n o11yag -f
+   kubectl get pods -n o11yag-oa -w
+   kubectl logs -l app.kubernetes.io/name=o11yag-loadgen -n o11yag-oa -f
    ```
 
 Redeploy without rebuilding with `bash build_deploy.sh --no-build`. `stop.sh`
@@ -685,7 +707,7 @@ work, and it is worth being exact about which of them you get for free:
 
 **Send a ticket** to the orchestrator:
 ```
-kubectl port-forward service/o11yag-orchestrator 8000:8000 -n o11yag
+kubectl port-forward service/o11yag-orchestrator 8000:8000 -n o11yag-oa
 
 curl -X POST http://localhost:8000/chat -H 'Content-Type: application/json' \
   -d '{"ticket_id":"TK-1","customer_id":"C-7","tenant":"acme",
@@ -704,27 +726,27 @@ curl -X POST http://localhost:8000/feedback -H 'Content-Type: application/json' 
 
 **The approvals page**:
 ```
-kubectl port-forward service/o11yag-approvals 8004:8004 -n o11yag
+kubectl port-forward service/o11yag-approvals 8004:8004 -n o11yag-oa
 # then open http://localhost:8004/
 ```
 
 **Ask the knowledge worker directly**:
 ```
-kubectl port-forward service/o11yag-knowledge-worker 8001:8001 -n o11yag
+kubectl port-forward service/o11yag-knowledge-worker 8001:8001 -n o11yag-oa
 curl -X POST http://localhost:8001/answer -H 'Content-Type: application/json' \
   -d '{"ticket_id":"TK-2","text":"How long do refunds take?"}'
 ```
 
 **Check the model gateway**:
 ```
-kubectl port-forward service/litellm 4000:4000 -n o11yag
+kubectl port-forward service/litellm 4000:4000 -n o11yag-oa
 curl http://localhost:4000/v1/models
 ```
 
 **If every MCP tool call fails with 421**, the action worker is reaching the
 server by a name the allowlist doesn't cover. The server says so:
 ```
-kubectl logs -l app.kubernetes.io/name=o11yag-mcp-crm -n o11yag | grep -i "host"
+kubectl logs -l app.kubernetes.io/name=o11yag-mcp-crm -n o11yag-oa | grep -i "host"
 #   WARNING mcp.server.transport_security Invalid Host header: <the name>
 #   INFO    ... "POST /mcp HTTP/1.1" 421 Misdirected Request
 ```

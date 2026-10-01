@@ -1,8 +1,8 @@
 """Thin wrapper over the model gateway (chat + embeddings).
 
 The agents speak the OpenAI API to LiteLLM, never Ollama's native API: it is the
-interface OpenLLMetry auto-instruments, and it makes the backend a gateway config
-change rather than a code change.
+interface LLM instrumentation targets (see orchestrator/llm.py), and it makes the
+backend a gateway config change rather than a code change.
 """
 from openai import OpenAI
 

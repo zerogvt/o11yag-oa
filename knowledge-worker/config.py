@@ -63,6 +63,3 @@ class Config:
     # observe exists to demonstrate what the attack does when nothing stops it.
     # It is not a monitoring mode — it is the attack succeeding, on purpose.
     INJECTION_ACTION = os.getenv("INJECTION_ACTION", "quarantine").strip().lower()
-
-    OTEL_ENABLED = _bool("OTEL_ENABLED", False)
-    OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")

@@ -1,7 +1,7 @@
 # o11yag — approval gate (human-in-the-loop): complete manifest set.
 #
 # The reviewer page is at / — reach it with:
-#   kubectl port-forward service/o11yag-approvals 8004:8004 -n o11yag
+#   kubectl port-forward service/o11yag-approvals 8004:8004 -n o11yag-oa
 # It only has anything to show when AUTO_APPROVE is false, or when a
 # refund is over AUTO_APPROVE_MAX_EUR.
 # Apply with:  kubectl apply -f o11yag-approvals.yaml
@@ -10,7 +10,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: o11yag-approvals-config
-  namespace: o11yag
+  namespace: o11yag-oa
   labels:
     app.kubernetes.io/name: o11yag-approvals
     app.kubernetes.io/component: approvals
@@ -21,10 +21,6 @@ data:
   PORT: "8004"
   WEB_CONCURRENCY: "2"
   GUNICORN_TIMEOUT: "60"
-
-  OTEL_ENABLED: "true"
-  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
-  TRACELOOP_TRACE_CONTENT: "false"
 
   REDIS_URL: "redis://redis:6379/0"
   APPROVAL_TTL_S: "3600"
@@ -41,7 +37,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: o11yag-approvals
-  namespace: o11yag
+  namespace: o11yag-oa
   labels:
     app.kubernetes.io/name: o11yag-approvals
     app.kubernetes.io/component: approvals
@@ -60,7 +56,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: o11yag-approvals
-  namespace: o11yag
+  namespace: o11yag-oa
   labels:
     app.kubernetes.io/name: o11yag-approvals
     app.kubernetes.io/component: approvals
@@ -102,11 +98,12 @@ spec:
               cpu: "500m"
               memory: "512Mi"
           # Startup gate. timeoutSeconds is set EXPLICITLY because it defaults
-          # to 1 second, and one second is not enough: Traceloop pulls in ~40
-          # instrumentation packages and every gunicorn worker does that import
-          # on boot, so /health cannot answer in time and the kubelet kills a
-          # pod that was coming up perfectly well ("Startup probe failed:
-          # context deadline exceeded"). 5s x 36 gives boot three minutes.
+          # to 1 second, and one second was not enough upstream: Traceloop
+          # pulls in ~40 instrumentation packages and every gunicorn worker does
+          # that import on boot, so /health cannot answer in time and the
+          # kubelet kills a pod that was coming up perfectly well ("Startup
+          # probe failed: context deadline exceeded"). Kept as is here: OneAgent
+          # injection adds its own boot cost. 5s x 36 gives boot three minutes.
           startupProbe:
             httpGet:
               path: /health

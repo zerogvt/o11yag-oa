@@ -15,8 +15,7 @@ from config import Config
 
 app = Flask(__name__)
 
-o11y.init(Config.SERVICE_NAME, Config.OTEL_EXPORTER_OTLP_ENDPOINT,
-          enabled=Config.OTEL_ENABLED, flask_app=app)
+o11y.init(Config.SERVICE_NAME)
 
 PAGE = """<!doctype html><meta charset=utf-8><title>o11yag approvals</title>
 <style>

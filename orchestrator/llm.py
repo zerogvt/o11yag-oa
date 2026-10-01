@@ -1,9 +1,9 @@
 """Thin wrapper over the model gateway.
 
 The agents speak the OpenAI API to LiteLLM, never Ollama's native API. Two
-reasons: it is the interface OpenLLMetry auto-instruments (so every call becomes
-a gen_ai.* span for free), and the backend becomes a gateway config change
-rather than a code change.
+reasons: it is the interface LLM instrumentation targets (OpenLLMetry upstream;
+here, OneAgent's OpenAI-SDK capture, if the tenant's OneAgent supports it), and
+the backend becomes a gateway config change rather than a code change.
 """
 from openai import OpenAI
 

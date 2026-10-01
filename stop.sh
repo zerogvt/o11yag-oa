@@ -1,4 +1,4 @@
-# Tear down the workloads but keep the namespace, the Dynatrace secret and the
+# Tear down the workloads but keep the namespace and the
 # PVCs (Ollama's models, Qdrant's vectors). build_deploy.sh --no-build then
 # brings everything back without a re-download or a re-seed.
 #
@@ -14,4 +14,3 @@ kubectl delete -f approvals/k8s/o11yag-approvals.yaml
 kubectl delete -f litellm/k8s/o11yag-litellm.yaml
 kubectl delete -f qdrant/k8s/o11yag-qdrant.yaml
 kubectl delete -f redis/k8s/o11yag-redis.yaml
-kubectl delete -f collector/k8s/o11yag-collector.yaml

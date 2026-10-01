@@ -5,7 +5,8 @@ tool, observe, decide again, bounded by MAX_STEPS. Consequential tools go
 through the approval gate first.
 
 Three signals here have no equivalent in a normal service and are the reason
-this is not just APM with different span names:
+this is not just APM with different span names. Upstream puts them on the
+action_worker span; with no OTel here they only reach the /act response:
 
   agent.loop.steps       how many iterations this ticket actually took. There is
                          no fixed call graph to compare against, so this series
@@ -25,18 +26,7 @@ from config import Config
 
 app = Flask(__name__)
 
-o11y.init(Config.SERVICE_NAME, Config.OTEL_EXPORTER_OTLP_ENDPOINT,
-          enabled=Config.OTEL_ENABLED, flask_app=app)
-
-try:
-    from traceloop.sdk.decorators import agent, tool as tool_span
-except ImportError:
-    def agent(*a, **k):
-        return lambda f: f
-
-    tool_span = agent
-
-from opentelemetry import trace  # noqa: E402
+o11y.init(Config.SERVICE_NAME)
 
 import approvals   # noqa: E402
 import llm         # noqa: E402
@@ -44,12 +34,10 @@ import mcp_client  # noqa: E402
 import planner     # noqa: E402
 import security    # noqa: E402
 
-tracer = trace.get_tracer("o11yag")
-
 # The catalogue this pod first saw, when nothing is pinned in config. Per
-# process, deliberately: it is a weaker control than a pinned digest and the
-# telemetry says which one is in force (`mcp.tools.baseline`) so the two are
-# never read as the same claim. A restart forgets, which is exactly the
+# process, deliberately: it is a weaker control than a pinned digest, and the
+# audit record of a change says which one was in force (`baseline`) so the two
+# are never read as the same claim. A restart forgets, which is exactly the
 # limitation — a server poisoned before the pod booted looks original.
 _first_seen_digest = None
 
@@ -57,24 +45,13 @@ SUMMARY = ("Tell the customer what you did, in two sentences, based only on the 
            "tool results below. Do not promise anything the results don't show.")
 
 
-@tool_span(name="mcp_tool_call")
 def invoke(name: str, args: dict, ticket_id: str, customer_id: str):
     """One MCP tool call, with the approval gate in front of the risky ones."""
-    span = trace.get_current_span()
-    span.set_attribute("mcp.server", "o11yag-crm")
-    span.set_attribute("mcp.transport", "streamable_http")
-    span.set_attribute("gen_ai.tool.name", name)
-    span.set_attribute("gen_ai.tool.call.arguments", json.dumps(args))
-
     approved = "not_required"
     if name in Config.CONSEQUENTIAL_TOOLS:
-        decision, approval_id, _ = approvals.request_and_wait(
+        decision, _, _ = approvals.request_and_wait(
             name, args, ticket_id, customer_id, reason="consequential tool")
         approved = decision
-        span.set_attribute("approval.required", True)
-        span.set_attribute("approval.decision", decision)
-        if approval_id:
-            span.set_attribute("approval.id", approval_id)
         if decision != "approved":
             o11y.tool_called(name, outcome="blocked", approved=decision)
             o11y.audit("o11yag.tool.blocked", tool=name, args=args,
@@ -85,8 +62,6 @@ def invoke(name: str, args: dict, ticket_id: str, customer_id: str):
         result = mcp_client.call_tool(name, args)
         outcome = "ok"
     except mcp_client.MCPUnavailable as exc:
-        span.set_attribute("error", True)
-        span.set_attribute("error.kind", "mcp_unavailable")
         o11y.tool_called(name, outcome="error", approved=approved)
         return {"error": str(exc)}
 
@@ -96,7 +71,7 @@ def invoke(name: str, args: dict, ticket_id: str, customer_id: str):
     return result
 
 
-def _screen_catalogue(tools, span, ticket_id: str):
+def _screen_catalogue(tools, ticket_id: str):
     """Check what the server just advertised, before any of it reaches the model.
 
     Two different attacks, one place to catch both:
@@ -124,7 +99,6 @@ def _screen_catalogue(tools, span, ticket_id: str):
     the loop continue under signals a human can act on.
     """
     digest = security.catalogue_digest(tools)
-    span.set_attribute("mcp.tools.digest", digest)
 
     global _first_seen_digest
     if Config.MCP_TOOLS_DIGEST:
@@ -137,11 +111,8 @@ def _screen_catalogue(tools, span, ticket_id: str):
                             "set MCP_TOOLS_DIGEST to this to pin it)", digest)
         expected = _first_seen_digest
 
-    span.set_attribute("mcp.tools.baseline", baseline)
     changed = digest != expected
-    span.set_attribute("mcp.tools.changed", changed)
     if changed:
-        span.set_attribute("mcp.tools.digest.expected", expected)
         o11y.security_event(kind="tool_catalogue_changed", action="observed",
                             source="mcp_server")
         o11y.audit("o11yag.security.tool_catalogue_changed",
@@ -149,15 +120,11 @@ def _screen_catalogue(tools, span, ticket_id: str):
                    digest=digest, expected=expected, tools=[t[0] for t in tools])
 
     detections = security.scan_tools(tools)
-    span.set_attribute("security.tool_poisoning.detected", bool(detections))
     if not detections:
         return tools
 
     redact = Config.TOOL_POISON_ACTION == "redact"
     action = "redacted" if redact else "observed"
-    span.set_attribute("security.tool_poisoning.action", action)
-    span.set_attribute("security.tool_poisoning.tools", [d["tool"] for d in detections])
-    span.set_attribute("security.tool_poisoning.kinds", sorted({d["kind"] for d in detections}))
     for d in detections:
         o11y.security_event(kind="tool_poisoning", action=action, source="mcp_server")
         o11y.audit("o11yag.security.tool_poisoned", ticket_id=ticket_id,
@@ -167,13 +134,11 @@ def _screen_catalogue(tools, span, ticket_id: str):
     return security.redact_tools(tools, detections) if redact else tools
 
 
-@agent(name="action_worker")
 def act(body: dict):
     text = str(body.get("text", ""))
     ticket_id = str(body.get("ticket_id", ""))
     customer_id = str(body.get("customer_id", ""))
 
-    span = trace.get_current_span()
     tokens, llm_calls, repeated = 0, 0, 0
     history, seen = [], set()
     terminated = "done"
@@ -182,11 +147,9 @@ def act(body: dict):
         tools = mcp_client.list_tools()
     except mcp_client.MCPUnavailable as exc:
         app.logger.exception("MCP server unreachable: %s", exc)
-        span.set_attribute("error.kind", "mcp_unavailable")
         return {"answer": "I can't reach our order system right now.",
                 "outcome": "error", "tokens": 0, "llm_calls": 0}
-    span.set_attribute("mcp.tools.available", [t[0] for t in tools])
-    tools = _screen_catalogue(tools, span, ticket_id)
+    tools = _screen_catalogue(tools, ticket_id)
 
     # This loop is the agent.
     for step in range(Config.MAX_STEPS):
@@ -212,26 +175,14 @@ def act(body: dict):
             repeated += 1
         seen.add(signature)
 
-        with tracer.start_as_current_span(f"step_{step}") as step_span:
-            step_span.set_attribute("step.index", step)
-            step_span.set_attribute("step.decided_by", decided_by)
-            if why:
-                # Why the model's answer was not used — "unparseable",
-                # "unknown_tool", "missing:order_id", "unknown:id", or
-                # "mode:rules". Without this the trace shows that the rules
-                # decided but not what the model got wrong.
-                step_span.set_attribute("step.fallback_reason", why)
-            # execute the planned decision
-            result = invoke(name, args, ticket_id, customer_id)
+        # Upstream wraps this in a step_<n> span carrying decided_by and, when
+        # the model's answer was not used, why. Nothing records either here.
+        # execute the planned decision
+        result = invoke(name, args, ticket_id, customer_id)
 
         history.append({"tool": name, "args": args, "result": result})
     else:
         terminated = "max_steps"
-
-    span.set_attribute("agent.loop.steps", len(history))
-    span.set_attribute("agent.loop.max_steps", Config.MAX_STEPS)
-    span.set_attribute("agent.loop.repeated", repeated)
-    span.set_attribute("agent.loop.terminated", terminated)
 
     answer, summary_tokens = _summarise(text, history)
     tokens += summary_tokens
