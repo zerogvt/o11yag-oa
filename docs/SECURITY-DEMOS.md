@@ -7,6 +7,14 @@ what you should see, and how to put it back.
 Read [`UPDATE-GAPS-1-2.md`](UPDATE-GAPS-1-2.md) §4 first if you want the
 mechanism. This document assumes it and covers only the operation.
 
+> **Where the signals are in this repo.** Upstream (o11yag-otel) reports each
+> incident three ways: span attributes, the `o11yag.security.events` metric and
+> an audit record. Here the span attributes went with the OTel code and the
+> metric is a no-op (see `o11y.py`), so the **audit record is the one signal
+> left**. It is a JSON line on the emitting pod's stdout. What OneAgent shows for
+> any of these incidents, and whether log monitoring parses the JSON fields, has
+> not been measured yet.
+
 > **The one rule.** Turn them off again when you are finished. A reference
 > architecture that ships an attack switched on is indistinguishable from a
 > backdoor, and the next person to read the corpus will not know which documents
@@ -21,7 +29,7 @@ ConfigMap and leaves the Deployment alone, because its spec is unchanged. The
 process keeps the configuration it booted with, and every flag below appears to
 do nothing.
 
-`build_deploy.sh` now handles this — it stamps a checksum of each manifest onto
+`bash build_deploy.sh` handles this — it stamps a checksum of each manifest onto
 the pod template, so a changed file rolls the pod on the next deploy, including
 with `--no-build`. If you edit a ConfigMap and apply it by hand, restart the pod
 yourself:
@@ -84,15 +92,20 @@ curl -X POST localhost:8001/answer -H 'Content-Type: application/json' \
 
 | Where | What |
 |---|---|
-| `screen_retrieval.task` span | `security.injection.detected = true`, `security.injection.kinds = [override]`, `security.injection.doc_ids = [kb-refunds-02]`, `security.injection.action = quarantined` |
-| Metric | `o11yag.security.events` with `kind=prompt_injection`, `action=quarantined`, `source=rag_corpus` |
-| Dashboard | the **Security detections** tile stops being empty |
-| Audit record | `o11yag.security.injection_detected`, carrying the phrase that matched |
+| Knowledge worker audit record | `o11yag.security.injection_detected` with `doc_id = kb-refunds-02`, `kind = override`, `action = quarantined`, the phrase that matched and the retrieval score |
+| Dynatrace | not yet measured. Upstream also sets `security.injection.*` attributes on the `screen_retrieval.task` span and counts `o11yag.security.events`; both are upstream-only |
+
+```
+kubectl logs deploy/o11yag-knowledge-worker -n o11yag-oa --since=30m \
+  | grep '"audit.event.type": "o11yag.security.injection_detected"'
+```
+
+In Dynatrace, a starting point:
 
 ```
 fetch logs, from: now()-30m
-| filter audit.event.type == "o11yag.security.injection_detected"
-| fields timestamp, audit.doc_id, audit.kind, audit.match, audit.action, audit.score
+| filter k8s.namespace.name == "o11yag-oa"
+| filter contains(content, "o11yag.security.injection_detected")
 | sort timestamp desc
 ```
 
@@ -107,9 +120,10 @@ stack declining to answer off a corpus it cannot trust — correct, not a fault.
   INJECTION_ACTION: "observe"
 ```
 
-Same detection, `action=observed`, and the document now reaches the prompt. Read
-the generated answer: it is the payload arriving. Compare the two runs side by
-side — the detection is identical, only `action` and the answer differ, which is
+Same detection, `"audit.action": "observed"`, and the document now reaches the
+prompt. Read the generated answer, in the knowledge worker's
+`o11yag.answer.generated` audit record: it is the payload arriving. Compare the
+two runs side by side — the detection is identical, only `action` and the answer differ, which is
 the whole point of keeping that dimension separate from the count.
 
 ---
@@ -144,9 +158,13 @@ kubectl logs -l app.kubernetes.io/name=o11yag-mcp-crm -n o11yag-oa | grep -i poi
 
 | Where | What |
 |---|---|
-| `action_worker.agent` span | `security.tool_poisoning.detected = true`, `.tools = [issue_refund]`, `.kinds = [override]`, `.action = redacted` |
-| Metric | `o11yag.security.events`, `kind=tool_poisoning`, `source=mcp_server` |
-| Audit record | `o11yag.security.tool_poisoned` with the matched phrase |
+| Action worker audit record | `o11yag.security.tool_poisoned` with `tool = issue_refund`, `kind = override`, `action = redacted` and the matched phrase |
+| Dynatrace | not yet measured. Upstream also sets `security.tool_poisoning.*` attributes on the `action_worker.agent` span and counts `o11yag.security.events`; both are upstream-only |
+
+```
+kubectl logs deploy/o11yag-action-worker -n o11yag-oa --since=30m \
+  | grep '"audit.event.type": "o11yag.security.tool_poisoned"'
+```
 
 With `TOOL_POISON_ACTION: "redact"` (the default) the description is blanked
 before the planner sees it and the tool stays callable. Set it to `"observe"` to
@@ -172,8 +190,8 @@ one afterwards. Tool names, schemas and the tool list are all unchanged.
 
 ### 1. Pin the clean digest first
 
-Read it off a clean run — it is on the span, and in the worker's log the first
-time it sees a catalogue:
+Read it off a clean run — the worker logs it the first time it sees a
+catalogue:
 
 ```
 kubectl logs -l app.kubernetes.io/name=o11yag-action-worker -n o11yag-oa | grep -i digest
@@ -186,9 +204,9 @@ Put it in `action-worker/k8s/o11yag-action-worker.yaml`:
   MCP_TOOLS_DIGEST: "84c7aad377cabc4e"
 ```
 
-and restart the action worker. `mcp.tools.baseline` on the span now reads
-`pinned` instead of `first_seen`, which is the difference between a control and a
-memory: pinned catches a server that was *already* poisoned before the pod
+and restart the action worker. A detected change now reports `baseline: pinned`
+instead of `first_seen` in its audit record, which is the difference between a
+control and a memory: pinned catches a server that was *already* poisoned before the pod
 booted, `first_seen` cannot.
 
 ### 2. Pull the rug
@@ -205,14 +223,20 @@ restart **that pod only**.
 
 | Where | What |
 |---|---|
-| `action_worker.agent` span | `mcp.tools.changed = true`, `mcp.tools.digest` (new), `mcp.tools.digest.expected` (old), `mcp.tools.baseline` |
-| Metric | `o11yag.security.events`, `kind=tool_catalogue_changed`, `action=observed` |
-| Audit record | `o11yag.security.tool_catalogue_changed`, carrying both digests |
+| Action worker audit record | `o11yag.security.tool_catalogue_changed` with `digest` (new), `expected` (old), `baseline` and the tool names |
+| Dynatrace | not yet measured. Upstream also sets `mcp.tools.*` attributes on the `action_worker.agent` span and counts `o11yag.security.events`; both are upstream-only |
+
+```
+kubectl logs deploy/o11yag-action-worker -n o11yag-oa --since=30m \
+  | grep '"audit.event.type": "o11yag.security.tool_catalogue_changed"'
+```
+
+In Dynatrace, a starting point:
 
 ```
 fetch logs, from: now()-30m
-| filter audit.event.type == "o11yag.security.tool_catalogue_changed"
-| fields timestamp, audit.baseline, audit.expected, audit.digest, audit.tools
+| filter k8s.namespace.name == "o11yag-oa"
+| filter contains(content, "o11yag.security.tool_catalogue_changed")
 ```
 
 **Nothing blocks, deliberately.** A worker that refuses to run because a
@@ -277,8 +301,9 @@ kubectl logs -l app.kubernetes.io/name=o11yag-knowledge-worker -n o11yag-oa | gr
 ```
 
 If you pinned a digest and then changed the poison flag, the pin is now stale and
-every ticket reports `mcp.tools.changed = true`. Re-read the digest and re-pin, or
-blank it.
+every ticket the action worker handles writes an
+`o11yag.security.tool_catalogue_changed` audit record. Re-read the digest and
+re-pin, or blank it.
 
 ---
 

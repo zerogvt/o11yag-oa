@@ -14,6 +14,14 @@ agentic architecture. Start here, then read the code in the order below.
 > Function names are used as anchors rather than line numbers, because line
 > numbers rot. `grep -n "def <name>" <file>` will find any of them.
 
+> **This is o11yag-oa.** The code is upstream's (o11yag-otel) with every piece of
+> OpenTelemetry instrumentation removed; Dynatrace OneAgent is injected instead.
+> So there are no decorators, no custom span attributes and no `o11yag.*` metrics
+> here. What the stack still says about itself goes into audit records: one JSON
+> object per line on stdout, which OneAgent log monitoring picks up. What
+> OneAgent captures on its own is not yet measured. Where this walkthrough names
+> a signal, it says which of those two it is.
+
 ---
 
 ## 1. Basic idea
@@ -53,8 +61,10 @@ cannot predict per request — falls out of that one difference.
 Over three hours of live traffic, this stack reported `outcome=ok` on all 45
 agent runs while the agent was calling one tool with wrong arguments and then
 giving up. No span had `error=true`. Every RED metric was green. The behaviour
-was only visible once custom span attributes were persisted and someone went
-looking. That is the failure mode this project exists to make legible.
+was only visible, upstream, once custom span attributes were persisted and
+someone went looking. That is the failure mode this project exists to make
+legible — and whether OneAgent, with no custom attributes at all, can show it is
+the question this repo asks.
 
 ---
 
@@ -76,10 +86,14 @@ natural language and the output has to be an action.
 The **supervisor**: it owns the ticket and decides who should work on it.
 
 - `CLASSIFY_PROMPT` — how you ask a model to pick one label from a list.
-- `classify()` — the LLM call. Decorated `@task`, so it becomes a span.
-- `handle()` — decorated `@workflow`. The whole ticket: classify, route to one
-  worker, accumulate tokens and call counts, emit the per-ticket roll-up, write
-  the audit record.
+- `classify()` — the LLM call. Upstream decorates it `@task` so it becomes a
+  span of its own; here it is a plain function, and whether OneAgent shows the
+  LLM call underneath is not yet measured.
+- `handle()` — the whole ticket: classify, route to one worker, accumulate tokens
+  and call counts, and write the `o11yag.ticket.handled` audit record. The
+  per-ticket metric roll-up (`o11y.task_finished()`) is a no-op here; the same
+  numbers are in the audit record, along with `intent_source`, which says
+  whether the model or the fallback picked the route.
 - `_heuristic_intent()` — the deterministic fallback, and worth your attention.
 
 **Why the fallback ordering matters.** It originally keyword-matched, so *"How
@@ -101,9 +115,11 @@ there is. The model does not know your return policy, so:
 2. find the nearest documents in Qdrant (`search`)
 3. paste them into the prompt and instruct the model to answer *only* from those
 
-`retrieval.py` is the whole idea in about 50 lines. In `app.py`, note `retrieve()`
-putting `rag.top_score` on the span, and `answer()` refusing to answer at all when
-the best match is below `MIN_SCORE`.
+`retrieval.py` is the whole idea in about 50 lines. In `app.py`, note `answer()`
+refusing to answer at all when the best match is below `MIN_SCORE`. Upstream puts
+the retrieval scores on the `retrieve` span (`rag.top_score`); here the top score
+reaches telemetry only through the `o11yag.answer.generated` and
+`o11yag.retrieval.ungrounded` audit records.
 
 **That refusal is the cheapest real guardrail in this repo.** The alternative is
 a model inventing a returns policy, fluently, with a 200 OK.
@@ -155,14 +171,17 @@ The general lesson is worth more than the code:
 The original fallback only triggered when the model's output was *unusable*. But
 `{"tool": "lookup_order", "args": {"id": "C-7"}}` is valid JSON naming a real
 tool — so it was accepted, sent, and failed at the server. The fix is to hold the
-model to the contract the server already publishes. Rejections are recorded as
-`step.fallback_reason` (`missing:order_id`, `unknown_tool`, `unparseable`).
+model to the contract the server already publishes. `next_step()` returns why it
+rejected the model (`missing:order_id`, `unknown_tool`, `unparseable`). Upstream
+records that as `step.fallback_reason` on the step span; here nothing records it.
 
 - `PLANNER_MODE` — `model` (default) or `rules`. In `rules` the model is not
   consulted for tool selection at all. It exists because a small local model
   rarely reaches a consequential tool, so the approval path is otherwise not
-  demonstrable. Every step it decides is tagged `step.decided_by=fallback`, so a
-  rules-driven run can never be passed off as model reasoning.
+  demonstrable. Upstream tags every step it decides `step.decided_by=fallback`,
+  so a rules-driven run can never be passed off as model reasoning. Here that
+  tag does not exist, and nothing in the telemetry tells a rules run from a
+  model run — keep that in mind before reading any trace from `rules` mode.
 
 **Honest limit:** validation fixes bad *arguments*. It does not fix a model that
 answers `{"done": true}` after one step — that is well-formed and in-contract, so
@@ -179,7 +198,9 @@ than in a prompt a model could argue its way around.
 
 **MCP** (Model Context Protocol) is just a standard for exposing those functions
 over a network instead of hardcoding them into the agent. Here it runs over
-Streamable HTTP, which is why trace context can cross the hop at all.
+Streamable HTTP. Upstream carries trace context across that hop by hand; this
+repo removed that code, so whether the MCP call joins the ticket's trace is down
+to OneAgent, and not yet measured.
 
 ### Stop 7 — `approvals/app.py`
 
@@ -191,19 +212,20 @@ always genuinely waits for a person. With auto-approve on, the gate proves
 nothing about governance; it is a timer wearing a reviewer's hat. That is stated
 in the README rather than glossed.
 
-The observability point: the wait gets its own span and its own metric. Both are
-on the worker's side of the gate, not in this file:
+The observability point: upstream gives the wait its own span (`approval_wait`)
+and its own metric (`o11yag.approval.wait`), both on the worker's side of the
+gate in `action-worker/approvals.py` `request_and_wait()`. Neither exists here:
+the span was OTel and `o11y.approval_waited()` is a no-op. What is left is the
+`o11yag.approval.decided` audit record this file writes, which carries
+`decision`, `decided_by` and `waited_s` per approval.
 
-- **span:** `approval_wait`, opened in `action-worker/approvals.py`
-  `request_and_wait()`, carrying `approval.decision`, `.decided_by`, `.waited_ms`
-- **metric:** `o11yag.approval.wait`, a histogram by `tool` and `decision`,
-  recorded through `o11y.approval_waited()` in `action-worker/o11y.py`
-
-Without them the wait is still measured, just inside the wrong numbers. The
-orchestrator is blocked for as long as the reviewer thinks, so every second lands
-in `o11yag.task.latency` (wall clock per ticket), and stretches the agent and
-tool-call spans above it. Take 95 tickets the machine finishes in ~3 s and 5
-refunds a person sits on for ~20 minutes (illustrative figures, not measured):
+Without a separate series the wait is still measured, just inside the wrong
+numbers. The orchestrator is blocked for as long as the reviewer thinks, so every
+second lands in the ticket's wall-clock latency (`latency_ms` on the
+`o11yag.ticket.handled` record, and whatever request duration OneAgent reports),
+and stretches every span above it. Take 95 tickets the machine finishes in ~3 s
+and 5 refunds a person sits on for ~20 minutes (illustrative figures, not
+measured):
 
 | | Wait mixed in | Machine time only |
 |---|---|---|
@@ -212,8 +234,9 @@ refunds a person sits on for ~20 minutes (illustrative figures, not measured):
 
 A latency alert then fires whenever someone takes their time, a model that slows
 from 3 s to 8 s disappears under the outliers, and "why are tickets slow?" has no
-answer. Kept apart, they are two questions for two owners: `o11yag.approval.wait`
-is staffing, and task latency minus it is engineering.
+answer. Kept apart, they are two questions for two owners: the approval wait is
+staffing, and task latency minus it is engineering. Here, keeping them apart
+means joining the two audit records by `ticket_id`.
 
 ---
 
@@ -223,21 +246,24 @@ For a refund ticket, the path through the code:
 
 ```
 loadgen                POST /chat
-orchestrator           handle()            @workflow "support_ticket"
-  ├─ classify()        @task               LLM: which intent?
-  └─ delegate()        @task               HTTP → action worker
-action-worker          act()               @agent
+orchestrator           handle()
+  ├─ classify()                            LLM: which intent?
+  └─ delegate()                            HTTP → action worker
+action-worker          act()
   ├─ planner.next_step()                   decide: lookup_order(ORD-1001)
-  ├─ invoke()          @tool               → MCP → mcp-crm executes it
+  ├─ invoke()                              → MCP → mcp-crm executes it
   ├─ planner.next_step()                   decide again, now knowing the total
-  ├─ invoke()          @tool               issue_refund — consequential!
+  ├─ invoke()                              issue_refund — consequential!
   │    └─ approvals.request_and_wait()     BLOCKS until a decision
   │         └─ mcp_client.call_tool()      only if approved
   └─ summarise                             LLM: tell the customer what happened
-orchestrator           roll-up + audit record
+orchestrator           audit record
 ```
 
-The decorators are not decoration: that tree *is* the trace you see in Dynatrace.
+Upstream decorates these functions (`@workflow`, `@task`, `@agent`, `@tool`) so
+that this tree *is* the trace. Here nothing names them: the trace is whatever
+OneAgent builds from the HTTP, MCP and LLM calls it sees, and how close that
+comes to this tree is not yet measured.
 
 ---
 
@@ -269,24 +295,28 @@ curl -X POST http://localhost:8000/chat -H 'Content-Type: application/json' \
        "text":"I want a refund for order ORD-1001, the headphones stopped working."}'
 ```
 
-Then open the trace in Dynatrace and read it top to bottom. Reading one trace
-teaches more in five minutes than the code does in an hour, because you watch the
-loop iterate.
+Then open the trace in Dynatrace and read it top to bottom, and read the audit
+records for the same ticket next to it:
 
-Things to look for:
+```
+kubectl logs -n o11yag-oa -l app.kubernetes.io/part-of=o11yag --prefix --max-log-requests=20 | grep LEARN-1
+```
 
-| Attribute | What it tells you |
-|---|---|
-| `agent.loop.steps` | How many iterations this ticket actually took |
-| `agent.loop.terminated` | `done`, or `max_steps` — the silent partial answer |
-| `agent.loop.repeated` | Same tool, same arguments, twice. No error, just waste |
-| `step.decided_by` | Model or deterministic rules |
-| `step.fallback_reason` | *Why* the model was overruled |
-| `gen_ai.tool.call.arguments` | What the model actually proposed |
-| `rag.top_score` | Whether retrieval gave the answer anything to stand on |
-| `quality.verdict` / `.decided_by` | Whether the answer was supported by its extracts, and who decided |
-| `security.injection.detected` | A retrieved document that carried instructions |
-| `mcp.tools.digest` / `.changed` | The tool catalogue's fingerprint, and whether it moved |
+Upstream, the signals below are span attributes. Here, each one is either in an
+audit record or gone:
+
+| Upstream attribute | What it tells you | Here |
+|---|---|---|
+| `agent.loop.steps` | How many iterations this ticket actually took | in the `/act` response (`steps`), not in any record |
+| `agent.loop.terminated` | `done`, or `max_steps` — the silent partial answer | in the `/act` response (`terminated`); `outcome=incomplete` on `o11yag.ticket.handled` |
+| `agent.loop.repeated` | Same tool, same arguments, twice. No error, just waste | in the `/act` response (`repeated_calls`), not in any record |
+| `step.decided_by` | Model or deterministic rules | gone |
+| `step.fallback_reason` | *Why* the model was overruled | gone |
+| `gen_ai.tool.call.arguments` | What the model actually proposed | `args` on `o11yag.tool.called` / `o11yag.tool.blocked` |
+| `rag.top_score` | Whether retrieval gave the answer anything to stand on | `top_score` on `o11yag.answer.generated` / `o11yag.retrieval.ungrounded` |
+| `quality.verdict` / `.decided_by` | Whether the answer was supported by its extracts, and who decided | `quality_verdict` / `quality_decided_by` on `o11yag.answer.generated` |
+| `security.injection.detected` | A retrieved document that carried instructions | an `o11yag.security.injection_detected` record per document |
+| `mcp.tools.digest` / `.changed` | The tool catalogue's fingerprint, and whether it moved | an `o11yag.security.tool_catalogue_changed` record when it moved; the first digest is in the action-worker log |
 
 The governance path — a refund reaching the gate, waiting, getting approved, and
 changing the system of record — already runs in `model` mode, but only by
@@ -301,27 +331,21 @@ Set it back to `model` afterwards; `rules` is a demo aid, not an honest default.
 
 ## 6. What this codebase learned the hard way
 
-Each of these cost real debugging time and is documented where it bites:
+Each of these cost real debugging time and is documented where it bites. Three
+of the lessons upstream learned were about its OTel instrumentation (persisting
+custom span attributes in Dynatrace, an undeclared `httpx` import in the
+Traceloop SDK, carrying trace context across the MCP hop by hand); that code is
+gone from this repo, so see upstream for those. What still applies here:
 
-- **Dynatrace does not persist custom span attributes by default.** It accepts
-  them and drops them, naming the casualties in
-  `supportability.non_persisted_attribute_keys` — including everything
-  OpenLLMetry emits. Metrics are a separate pipeline, so the dashboard looks
-  healthy while the traces are hollow.
-- **`traceloop-sdk` imports `httpx` without declaring it**, and nothing else in a
-  modern LLM stack still pulls httpx in (`openai` 3.x and `mcp` 2.x both moved to
-  `httpx2`). Every service lists it explicitly.
-- **Trace context crosses the MCP hop in the JSON-RPC envelope, not the HTTP
-  headers.** The SDK injects it into `_meta` (SEP-414) and the server's own
-  middleware reads it back, so the tool call is parented for free — over stdio
-  too. What is *not* free is the HTTP layer underneath: the MCP SDK speaks
-  `httpx2` and the OTel httpx instrumentation does not see it, so without the
-  hand-injection in `mcp_client.py` the `POST /mcp` and `DELETE /mcp` spans root
-  traces of their own.
 - **The MCP server validates the `Host` header** and auto-allows only localhost,
   so in Kubernetes everything returns 421 until the Service name is allow-listed.
-- **`startupProbe.timeoutSeconds` defaults to one second**, which is not enough
-  for Traceloop's imports — healthy pods were being killed at 60s.
+- **`startupProbe.timeoutSeconds` defaults to one second.** Upstream's
+  instrumentation imports made that too short and healthy pods were killed at
+  60s; the longer timeout is kept here because OneAgent injection adds boot
+  time of its own.
+- **A Dynatrace Operator in `applicationMonitoring` mode runs log monitoring
+  standalone**, and refuses the DynaKube unless it knows which log-module image
+  to run. See the comments in `dynatrace/k8s/dynakube.yaml`.
 
 The pattern across all of them: everything static passed — manifests parsed,
 Python compiled, queries validated — and the system still misbehaved at runtime.
@@ -335,7 +359,8 @@ backend's ingest rules, not the code.
 The main [README](../README.md) covers the four observability gaps, the full
 signals reference, and what the project deliberately does not do.
 
-Gap 1 — silent semantic failure — now has a signal rather than a hole:
+Gap 1 — silent semantic failure — has a signal rather than a hole, carried here
+by audit records rather than spans and metrics:
 [`UPDATE-GAPS-1-2.md`](UPDATE-GAPS-1-2.md) walks the judge that grades an answer
 against the extracts it was given, the feedback endpoint that is the only input
 the stack cannot generate about itself, and the security act — indirect prompt

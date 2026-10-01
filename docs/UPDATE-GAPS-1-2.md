@@ -12,6 +12,14 @@ parts that did not exist then.
 > [`SECURITY-DEMOS.md`](SECURITY-DEMOS.md) — this document explains the
 > mechanism, that one is the operating procedure.
 
+> **This is o11yag-oa.** These parts were built upstream (o11yag-otel), where
+> their signals are OTel spans, span attributes and `o11yag.*` metrics. All of
+> that instrumentation is removed here and Dynatrace OneAgent is injected
+> instead. The logic is unchanged; what it records goes into audit records, one
+> JSON object per line on stdout, picked up by OneAgent log monitoring. What
+> OneAgent captures beyond that is not yet measured. Where this document names a
+> signal, it says which one survives here.
+
 ---
 
 ## 1. The two ideas
@@ -28,7 +36,8 @@ needed a signal that did not exist.
 retrieves and the tool descriptions it is handed. Both are attacker-controlled in
 any real deployment. An instruction planted in either one produces a trace that
 is *indistinguishable from the agent deciding by itself* — well-formed call, in
-schema, `step.decided_by=model`. There was no signal for that either.
+schema, and upstream even tagged `step.decided_by=model`. There was no signal for
+that either.
 
 Both gaps have the same shape, which is why they were built together: **the
 system succeeds, and the success is the bug.**
@@ -42,13 +51,13 @@ system succeeds, and the success is the bug.**
 | `knowledge-worker/judge.py` | new | Grades an answer against its extracts. Two graders |
 | `knowledge-worker/security.py` | new | Screens retrieved documents *and* tool catalogues |
 | `action-worker/security.py` | new | The same file, copied verbatim (see below) |
-| `knowledge-worker/app.py` | changed | Two new spans: `screen_retrieval`, `judge_answer` |
+| `knowledge-worker/app.py` | changed | Two new stages, `screen()` and `judge_answer()` (upstream: two new spans) |
 | `knowledge-worker/kb.py` | changed | `POISON_DOC` + `docs()`, gated by a flag |
 | `knowledge-worker/retrieval.py` | changed | Reseeds when the corpus size changes |
 | `action-worker/app.py` | changed | `_screen_catalogue()` between discovery and the loop |
 | `mcp-crm/server.py` | changed | Can advertise a poisoned `issue_refund` description |
-| `orchestrator/app.py` | changed | Returns `trace_id`; new `POST /feedback` |
-| `*/o11y.py` | changed | Three new metric families, propagated to all five copies |
+| `orchestrator/app.py` | changed | Returns `trace_id` (always empty here); new `POST /feedback` |
+| `*/o11y.py` | changed | Upstream: three new metric families. Here: `answer_judged()`, `feedback_received()` and `security_event()` exist as no-ops |
 | `litellm/k8s/…` | changed | New `support-judge` gateway alias |
 
 **Why `security.py` is duplicated.** Same reason as `o11y.py`: each Docker build
@@ -81,10 +90,13 @@ Two orderings in there are load-bearing and easy to get backwards:
   evidence, so the floor has to be applied to the best *usable* score. Dropping
   the top hit can legitimately push the ticket into the ungrounded path — that is
   the stack declining to answer off a corpus it cannot trust, not an edge case.
-- **Judging happens after generation, on its own span.** Folding it into
-  `generate_answer` would blend answering latency with checking latency and make
-  "what did the quality signal cost" unanswerable. Same reasoning that keeps
-  `approval_wait` out of the tool call.
+- **Judging happens after generation, in its own function.** Upstream gives it
+  its own span; folding it into `generate_answer` would blend answering latency
+  with checking latency and make "what did the quality signal cost" unanswerable.
+  Same reasoning that keeps `approval_wait` out of the tool call. Here neither
+  span exists, so whether OneAgent separates the judge's LLM call from the
+  answer's is not yet measured; the judge's tokens are in the total `tokens` on
+  `o11yag.answer.generated`, not on their own.
 
 ### Stop 2 — `knowledge-worker/judge.py`, the `grade()` function
 
@@ -142,12 +154,15 @@ the only input that can contradict it.
 
 The mechanics worth noticing:
 
-- **`/chat` now returns `trace_id`.** Feedback arrives minutes or days later on a
-  trace of its own; without the id the only join is the ticket id, and a
-  thumbs-down becomes a thing you can count but not open.
-- **Two trace ids on one record.** `audit.trace_id` is *this request's* trace.
-  `audit.subject_trace_id` is the trace being rated. Confusing them is what makes
-  a feedback store look correct and pivot to nothing.
+- **`/chat` returns `trace_id`, but here it is always empty.** Feedback arrives
+  minutes or days later on a trace of its own; upstream hands the caller the
+  trace id so the rating can name the trace it is about. Without the OTel API
+  there is no trace id to read, so here the only join is the ticket id, and a
+  thumbs-down is a thing you can count but not open.
+- **Upstream puts two trace ids on one record**: `audit.trace_id` (this request)
+  and `audit.subject_trace_id` (the trace being rated). Here the audit record
+  has no `trace_id`, and `subject_trace_id` is only present if a caller supplies
+  one.
 - It lives on the orchestrator because the orchestrator owns the ticket — the
   verdict lands beside the cost and the intent rather than in a system nobody
   joins to.
@@ -218,7 +233,9 @@ moves. The only thing that catches it is `catalogue_digest()`: a sha256 over
 names, descriptions and schemas, sorted by name so the server's iteration order
 is not mistaken for a change.
 
-Read `mcp.tools.baseline` on the span before you trust `mcp.tools.changed`:
+Know which baseline was in force before you trust a change. Upstream puts it on
+the span as `mcp.tools.baseline`; here it is the `baseline` field on the
+`o11yag.security.tool_catalogue_changed` audit record:
 
 | Baseline | Set by | Catches | Blind to |
 |---|---|---|---|
@@ -246,22 +263,25 @@ not care who asked for the refund.
 
 ```
 POST /chat                            orchestrator
-└─ support_ticket.workflow
-   ├─ classify_intent.task            LLM: which intent?
-   └─ delegate_to_worker.task         HTTP → knowledge worker
+└─ handle()
+   ├─ classify()                      LLM: which intent?
+   └─ delegate()                      HTTP → knowledge worker
       └─ POST /answer
-         └─ knowledge_worker.agent
-            ├─ retrieve.task          embed + qdrant  → rag.top_score
-            ├─ screen_retrieval.task  ← NEW  security.injection.*
-            ├─ generate_answer.task   LLM: the answer
-            └─ judge_answer.task      ← NEW  quality.*  (a second LLM call)
-   roll-up + audit record             quality now rides along in it
+         └─ answer()
+            ├─ retrieve()             embed + qdrant
+            ├─ screen()               ← NEW  audit: o11yag.security.injection_detected
+            ├─ generate()             LLM: the answer
+            └─ judge_answer()         ← NEW  a second LLM call
+   audit: o11yag.answer.generated     top_score, quality_verdict, quality_decided_by
+   audit: o11yag.ticket.handled       quality now rides along in it
 
 POST /feedback                        orchestrator — ITS OWN TRACE, later
 ```
 
-The two new spans are `@task`-decorated like the rest, so they appear in the
-waterfall without any extra wiring.
+Upstream, every function here is decorated (`@workflow`, `@task`, `@agent`), so
+the tree is the waterfall and the two new stages appear as spans carrying
+`security.injection.*` and `quality.*`. Here nothing is decorated: how much of
+this tree OneAgent reconstructs from the HTTP and LLM calls is not yet measured.
 
 ---
 
@@ -284,7 +304,7 @@ reference architecture is indistinguishable from a backdoor.
 
 `JUDGE_ACTION` is the one to think hardest about. `observe` is the default
 because a weak judge withholding good answers is a worse product than a wrong
-answer you can see in a dashboard — but `observe` means the unsupported answer
+answer you can see in the audit records — but `observe` means the unsupported answer
 *is still sent*. Nobody should flip it to `withhold` before measuring their own
 false-positive rate on their own corpus.
 
@@ -292,44 +312,49 @@ false-positive rate on their own corpus.
 
 ## 7. Try it
 
-Each of these produces one specific signal. Restart the pod after a ConfigMap
-edit.
+Each of these produces one specific audit record. After a ConfigMap edit, run
+`bash build_deploy.sh --no-build`; it restarts only the pods whose config
+changed. Read the records with
+`kubectl logs deploy/<service> -n o11yag-oa | grep '^{'`.
 
 **An answer graded unsupported.** The blunt way, which exercises the plumbing
 rather than a real hallucination: set `JUDGE_MIN_OVERLAP: "0.9"` and ask anything.
-Look for `quality.verdict=unsupported`, `decided_by=heuristic`,
-`reason=low_overlap:…`.
+Look for `audit.quality_verdict=unsupported`,
+`audit.quality_decided_by=heuristic`, `audit.quality_reason=low_overlap:…` on
+`o11yag.answer.generated` in the knowledge-worker log.
 
-**A thumbs-down joined to its trace.**
+**A thumbs-down joined to its ticket.** Upstream joins it to the trace; here
+`/chat` returns an empty `trace_id`, so the ticket id is the join.
 
 ```
 curl -X POST http://localhost:8000/feedback -H 'Content-Type: application/json' \
   -d '{"ticket_id":"LEARN-9","rating":"down","intent":"question",
-       "trace_id":"<the trace_id /chat returned>",
        "comment":"quoted a 60-day return window that does not exist"}'
 ```
 
-Then pivot: `fetch logs | filter audit.event.type == "o11yag.feedback.received"`
-and open `audit.subject_trace_id`.
+Then find both records for the ticket: `o11yag.feedback.received` and
+`o11yag.ticket.handled` with `audit.ticket_id == "LEARN-9"`, in the orchestrator
+log, or in Dynatrace once OneAgent log monitoring has ingested them.
 
 **An injection landing, then stopped.** Set `KB_POISON_DOC: "true"` and
 `INJECTION_ACTION: "observe"`, then ask about a faulty item and read the
 generated answer and the agent's behaviour. Then set `INJECTION_ACTION` back to
-`quarantine` and ask again: `security.injection.detected` is true in both runs;
-what changes is `action`, and what the model was given.
+`quarantine` and ask again: an `o11yag.security.injection_detected` record is
+written in both runs; what changes is its `action`, and what the model was given.
 
 **A rug pull.** With the stack running and traffic flowing, set
 `POISON_TOOL_DESCRIPTION: "true"` on the **mcp-crm** ConfigMap and roll that pod
-only. The next ticket's `action_worker` span carries `mcp.tools.changed=true`
-with both digests, and `o11yag.security.tool_catalogue_changed` fires.
+only. The next ticket writes an `o11yag.security.tool_catalogue_changed` audit
+record with both digests (`digest`, `expected`) and the `baseline` in force.
+Upstream also marks the `action_worker` span `mcp.tools.changed=true`.
 
 ### Not yet built: producing a genuinely false answer
 
-Worth separating from everything above, because the two look identical on the
-dashboard and are not the same test.
+Worth separating from everything above, because the two look identical in the
+records and are not the same test.
 
 Raising `JUDGE_MIN_OVERLAP` to `0.9` flags ordinary paraphrase. It exercises the
-judge, the metric and the tile, and it tells you nothing about hallucination — it
+judge and its audit record, and it tells you nothing about hallucination — it
 is a plumbing test wearing a quality test's clothes.
 
 Inducing an answer that is actually unsupported needs three things, none of which
@@ -354,8 +379,8 @@ exist yet:
   `temperature=0.2`; temperature is the most direct dial on invention and there
   is currently no way to turn it.
 
-The reason to build this is not the demo. It is that every verdict on the
-dashboard today is unlabelled: 5 of the first 12 answers were flagged
+The reason to build this is not the demo. It is that every verdict the judge
+records today is unlabelled: 5 of the first 12 answers were flagged
 `low_overlap`, and nothing in the stack can say whether those were right. Trap
 questions are the only cheap source of ground truth — a known-bad answer the
 judge *should* catch, and a known-good one it should leave alone. Without them,
