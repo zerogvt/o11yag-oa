@@ -4,23 +4,42 @@ set -eo pipefail
 #   ./build_deploy.sh                  build fresh images and deploy them
 #   ./build_deploy.sh --no-build       redeploy the newest images already built
 #   ./build_deploy.sh --tag 20260917184017   redeploy one specific build
-#   ./build_deploy.sh --no-oneagent    deploy without the DynaKube (uninstrumented)
+#   ./build_deploy.sh --oneagent       also apply this repo's DynaKube (scoped to o11yag-oa)
+#
+# By default no DynaKube is applied: OneAgent then comes only from a DynaKube
+# that already injects cluster-wide. The operator rejects a second DynaKube
+# whose namespaces or nodes overlap an existing one, so --oneagent is only for a
+# cluster with no other DynaKube.
 
 BUILD=1
-ONEAGENT=1
+ONEAGENT=0
 TAG=""
 SVCS="orchestrator knowledge-worker action-worker mcp-crm approvals loadgen"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --no-build) BUILD=0 ;;
-    --no-oneagent) ONEAGENT=0 ;;
+    --oneagent)    ONEAGENT=1 ;;
+    --no-oneagent) ONEAGENT=0 ;;   # the default now; kept so old commands still work
     --tag)      shift; TAG="$1"; BUILD=0 ;;
-    -h|--help)  sed -n '3,8p' "$0"; exit 0 ;;
+    -h|--help)  sed -n '3,13p' "$0"; exit 0 ;;
     *)          echo "Unknown option: $1" >&2; exit 1 ;;
   esac
   shift
 done
+
+if [ "$ONEAGENT" -eq 1 ]; then
+  echo " * * * OneAgent: applying this repo's DynaKube (--oneagent) * * * "
+else
+  echo " * * * OneAgent: NOT applying this repo's DynaKube (pass --oneagent to apply it) * * * "
+  echo "     Pods get OneAgent only if an existing DynaKube injects into o11yag-oa."
+  DKS="$(kubectl get dynakubes -A 2>/dev/null || true)"
+  if [ -n "$DKS" ]; then
+    echo "$DKS"
+  else
+    echo "     No DynaKube on this cluster: nothing will be instrumented."
+  fi
+fi
 
 echo " * * * Creating namespace * * * "
 kubectl apply -f k8s/o11yag_ns.yaml
@@ -32,7 +51,7 @@ if [ "$ONEAGENT" -eq 1 ]; then
   echo " * * * Configuring Dynatrace OneAgent * * * "
   if ! kubectl get crd dynakubes.dynatrace.com >/dev/null 2>&1; then
     echo "The Dynatrace Operator is not installed (no DynaKube CRD)." >&2
-    echo "Install it first, or pass --no-oneagent to deploy uninstrumented." >&2
+    echo "Install it first, or drop --oneagent." >&2
     exit 1
   fi
 
@@ -69,8 +88,6 @@ if [ "$ONEAGENT" -eq 1 ]; then
   sed "/^  apiUrl:/ s/DT_TENANT/${DT_TENANT}/" dynatrace/k8s/dynakube.yaml | kubectl apply -f -
   # The webhook is what injects; the ActiveGate can finish coming up later.
   kubectl rollout status deployment/dynatrace-webhook -n dynatrace --timeout=180s
-else
-  echo " * * * --no-oneagent: deploying WITHOUT OneAgent, nothing will be instrumented * * * "
 fi
 
 # Stateful/pulled-image infrastructure first: the services below all fail their

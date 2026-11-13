@@ -12,13 +12,17 @@
   "tiles": {
     "0": {
       "type": "markdown",
-      "content": "# o11yag \u2014 agent operations\n\nMetrics the o11yag stack emits about its own agent work, via OpenLLMetry \u2192 OTel Collector \u2192 Dynatrace.\n\nEvery metric here is measured **per resolved ticket**, not per LLM call \u2014 the roll-up the SDKs do not give you. `intent` is what the orchestrator routed the ticket as; `tenant` is the customer it belonged to.\n\n**Loop depth** (`llm_calls`) is the series to watch: agent work is non-deterministic, so there is no fixed call graph to alert on, and this is the closest thing to a baseline."
+      "content": "## o11yag-oa — agent operations, observed by OneAgent\n\nThe same agent stack as upstream (o11yag-otel), with all OpenTelemetry code removed and Dynatrace OneAgent injected into every pod in namespace `o11yag-oa`. Two data sources, and every tile says which one it uses:\n\n- **Audit records.** The services write one JSON object per line to stdout (`o11y.audit()`). OneAgent log monitoring ingests them, but **merges each JSON line into the log line printed just before it** and does not parse the JSON. Every audit tile therefore splits `content` on newlines and parses the audit lines itself. Measured 2026-10-01: none lost, the per-service counts match `kubectl logs`.\n- **OneAgent spans.** Request spans, `openai.chat` / `openai.embeddings` spans with `gen_ai.*` model and token attributes, Redis calls. `dt.service.name` is `app` for every Flask service, so tiles group by `k8s.workload.name` instead.\n\nUpstream's `o11yag.*` metrics and custom span attributes do not exist here. The bottom section lists what OneAgent does not capture."
     },
     "1": {
+      "type": "markdown",
+      "content": "### Tickets — from `o11yag.ticket.handled` audit records"
+    },
+    "2": {
       "type": "data",
       "title": "Tickets handled",
-      "description": "Total tickets the orchestrator completed in the timeframe.",
-      "query": "timeseries all = sum(o11yag.tasks)\n| fieldsAdd tickets = arraySum(all)\n| fields tickets",
+      "description": "Tickets the orchestrator completed (one o11yag.ticket.handled record each).",
+      "query": "fetch logs\n| filter k8s.namespace.name == \"o11yag-oa\" and (contains(content, \"o11yag.ticket.handled\"))\n| fieldsAdd line = splitString(content, \"\\n\")\n| expand line\n| filter startsWith(line, \"{\\\"audit.event.type\\\"\")\n| parse line, \"JSON:a\"\n| fieldsAdd ev = a[`audit.event.type`]\n| filter in(ev, {\"o11yag.ticket.handled\"})\n| fieldsAdd intent = toString(a[`audit.intent`]), outcome = toString(a[`audit.outcome`]), intent_source = toString(a[`audit.intent_source`]), latency_ms = toDouble(a[`audit.latency_ms`]), llm_calls = toDouble(a[`audit.llm_calls`]), tokens = toDouble(a[`audit.tokens`]), cost_usd = toDouble(a[`audit.cost_usd`])\n| summarize tickets = count()",
       "visualization": "singleValue",
       "visualizationSettings": {
         "singleValue": {
@@ -53,66 +57,27 @@
         "enabled": false
       }
     },
-    "2": {
-      "type": "data",
-      "title": "Error rate",
-      "description": "Share of tickets that ended in outcome=error. Computed by grouping on outcome rather than by filtering a second series: a filtered timeseries that matches nothing drops every series in the same block, so the old query went blank whenever there were no errors \u2014 the healthy case rendered as a broken tile.",
-      "query": "timeseries tickets = sum(o11yag.tasks), by: {outcome}\n| fieldsAdd n = arraySum(tickets)\n| summarize all = sum(n), err = sum(if(outcome == \"error\", n, else: 0))\n| fieldsAdd error_rate = err * 100.0 / all\n| fields error_rate",
-      "visualization": "singleValue",
-      "visualizationSettings": {
-        "singleValue": {
-          "label": "% of tickets",
-          "recordField": "error_rate"
-        },
-        "unitsOverrides": [
-          {
-            "added": 1757030400000,
-            "baseUnit": "percent",
-            "cascade": null,
-            "decimals": 1,
-            "delimiter": true,
-            "displayUnit": null,
-            "identifier": "error_rate",
-            "suffix": "",
-            "unitCategory": "percentage"
-          }
-        ]
-      },
-      "querySettings": {
-        "defaultSamplingRatio": 10,
-        "defaultScanLimitGbytes": 500,
-        "enableSampling": false,
-        "maxResultMegaBytes": 1,
-        "maxResultRecords": 1000
-      },
-      "davis": {
-        "davisVisualization": {
-          "isAvailable": true
-        },
-        "enabled": false
-      }
-    },
     "3": {
       "type": "data",
-      "title": "Cost",
-      "description": "Cost of all tickets. Priced from tokens \u2014 see the README: a local model is free, so this demonstrates attribution, it does not measure spend.",
-      "query": "timeseries cost = sum(o11yag.task.cost.usd)\n| fieldsAdd total_cost_usd = arraySum(cost)\n| fields total_cost_usd",
+      "title": "Error rate",
+      "description": "Share of tickets with outcome=error. Escalated and blocked are not errors.",
+      "query": "fetch logs\n| filter k8s.namespace.name == \"o11yag-oa\" and (contains(content, \"o11yag.ticket.handled\"))\n| fieldsAdd line = splitString(content, \"\\n\")\n| expand line\n| filter startsWith(line, \"{\\\"audit.event.type\\\"\")\n| parse line, \"JSON:a\"\n| fieldsAdd ev = a[`audit.event.type`]\n| filter in(ev, {\"o11yag.ticket.handled\"})\n| fieldsAdd intent = toString(a[`audit.intent`]), outcome = toString(a[`audit.outcome`]), intent_source = toString(a[`audit.intent_source`]), latency_ms = toDouble(a[`audit.latency_ms`]), llm_calls = toDouble(a[`audit.llm_calls`]), tokens = toDouble(a[`audit.tokens`]), cost_usd = toDouble(a[`audit.cost_usd`])\n| summarize n = count(), err = countIf(outcome == \"error\")\n| fieldsAdd error_rate = if(n > 0, 100.0 * err / n, else: 0.0)\n| fields error_rate",
       "visualization": "singleValue",
       "visualizationSettings": {
         "singleValue": {
-          "label": "USD",
-          "recordField": "total_cost_usd"
+          "label": "% errors",
+          "recordField": "error_rate"
         },
         "unitsOverrides": [
           {
             "added": 1757030400000,
             "baseUnit": "count",
             "cascade": null,
-            "decimals": 4,
+            "decimals": 1,
             "delimiter": true,
             "displayUnit": null,
-            "identifier": "total_cost_usd",
-            "suffix": "",
+            "identifier": "error_rate",
+            "suffix": "%",
             "unitCategory": "unspecified"
           }
         ]
@@ -133,24 +98,24 @@
     },
     "4": {
       "type": "data",
-      "title": "Avg loop depth",
-      "description": "Mean LLM calls per ticket. Rising here means the agent is working harder for the same outcome.",
-      "query": "timeseries calls = avg(o11yag.task.llm_calls)\n| fieldsAdd avg_llm_calls = arrayAvg(calls)\n| fields avg_llm_calls",
+      "title": "Cost",
+      "description": "Sum of cost_usd: tokens priced at COST_PER_1K_TOKENS_USD. A notional price; the model is local.",
+      "query": "fetch logs\n| filter k8s.namespace.name == \"o11yag-oa\" and (contains(content, \"o11yag.ticket.handled\"))\n| fieldsAdd line = splitString(content, \"\\n\")\n| expand line\n| filter startsWith(line, \"{\\\"audit.event.type\\\"\")\n| parse line, \"JSON:a\"\n| fieldsAdd ev = a[`audit.event.type`]\n| filter in(ev, {\"o11yag.ticket.handled\"})\n| fieldsAdd intent = toString(a[`audit.intent`]), outcome = toString(a[`audit.outcome`]), intent_source = toString(a[`audit.intent_source`]), latency_ms = toDouble(a[`audit.latency_ms`]), llm_calls = toDouble(a[`audit.llm_calls`]), tokens = toDouble(a[`audit.tokens`]), cost_usd = toDouble(a[`audit.cost_usd`])\n| summarize cost_usd = sum(cost_usd)",
       "visualization": "singleValue",
       "visualizationSettings": {
         "singleValue": {
-          "label": "LLM calls / ticket",
-          "recordField": "avg_llm_calls"
+          "label": "USD",
+          "recordField": "cost_usd"
         },
         "unitsOverrides": [
           {
             "added": 1757030400000,
             "baseUnit": "count",
             "cascade": null,
-            "decimals": 2,
+            "decimals": 4,
             "delimiter": true,
             "displayUnit": null,
-            "identifier": "avg_llm_calls",
+            "identifier": "cost_usd",
             "suffix": "",
             "unitCategory": "unspecified"
           }
@@ -172,19 +137,28 @@
     },
     "5": {
       "type": "data",
-      "title": "Ticket volume by outcome",
-      "description": "ok / error / escalated / blocked over time. 'blocked' means the approval gate refused a tool call.",
-      "query": "timeseries tickets = sum(o11yag.tasks), by: {outcome}",
-      "visualization": "lineChart",
+      "title": "LLM calls per ticket",
+      "description": "Average llm_calls per ticket — the loop-depth signal.",
+      "query": "fetch logs\n| filter k8s.namespace.name == \"o11yag-oa\" and (contains(content, \"o11yag.ticket.handled\"))\n| fieldsAdd line = splitString(content, \"\\n\")\n| expand line\n| filter startsWith(line, \"{\\\"audit.event.type\\\"\")\n| parse line, \"JSON:a\"\n| fieldsAdd ev = a[`audit.event.type`]\n| filter in(ev, {\"o11yag.ticket.handled\"})\n| fieldsAdd intent = toString(a[`audit.intent`]), outcome = toString(a[`audit.outcome`]), intent_source = toString(a[`audit.intent_source`]), latency_ms = toDouble(a[`audit.latency_ms`]), llm_calls = toDouble(a[`audit.llm_calls`]), tokens = toDouble(a[`audit.tokens`]), cost_usd = toDouble(a[`audit.cost_usd`])\n| summarize llm_calls = avg(llm_calls)",
+      "visualization": "singleValue",
       "visualizationSettings": {
-        "chartSettings": {
-          "curve": "smooth",
-          "gapPolicy": "connect",
-          "legend": {
-            "position": "bottom"
-          },
-          "xAxisScaling": "analyzedTimeframe"
-        }
+        "singleValue": {
+          "label": "calls / ticket",
+          "recordField": "llm_calls"
+        },
+        "unitsOverrides": [
+          {
+            "added": 1757030400000,
+            "baseUnit": "count",
+            "cascade": null,
+            "decimals": 2,
+            "delimiter": true,
+            "displayUnit": null,
+            "identifier": "llm_calls",
+            "suffix": "",
+            "unitCategory": "unspecified"
+          }
+        ]
       },
       "querySettings": {
         "defaultSamplingRatio": 10,
@@ -202,16 +176,18 @@
     },
     "6": {
       "type": "data",
-      "title": "Ticket mix by intent",
-      "description": "How the orchestrator routed traffic. If one intent is missing entirely, routing is broken \u2014 that is how the knowledge worker went dark.",
-      "query": "timeseries t = sum(o11yag.tasks), by: {intent}\n| fieldsAdd tickets = arraySum(t)\n| fields intent, tickets",
-      "visualization": "donutChart",
+      "title": "Ticket volume by outcome",
+      "description": "ok / escalated / blocked / incomplete / error over time.",
+      "query": "fetch logs\n| filter k8s.namespace.name == \"o11yag-oa\" and (contains(content, \"o11yag.ticket.handled\"))\n| fieldsAdd line = splitString(content, \"\\n\")\n| expand line\n| filter startsWith(line, \"{\\\"audit.event.type\\\"\")\n| parse line, \"JSON:a\"\n| fieldsAdd ev = a[`audit.event.type`]\n| filter in(ev, {\"o11yag.ticket.handled\"})\n| fieldsAdd intent = toString(a[`audit.intent`]), outcome = toString(a[`audit.outcome`]), intent_source = toString(a[`audit.intent_source`]), latency_ms = toDouble(a[`audit.latency_ms`]), llm_calls = toDouble(a[`audit.llm_calls`]), tokens = toDouble(a[`audit.tokens`]), cost_usd = toDouble(a[`audit.cost_usd`])\n| makeTimeseries tickets = count(), by: {outcome}",
+      "visualization": "lineChart",
       "visualizationSettings": {
         "chartSettings": {
-          "circleChartSettings": {
-            "showTotalValue": true,
-            "valueType": "absolute"
-          }
+          "curve": "smooth",
+          "gapPolicy": "connect",
+          "legend": {
+            "position": "bottom"
+          },
+          "xAxisScaling": "analyzedTimeframe"
         }
       },
       "querySettings": {
@@ -230,20 +206,11 @@
     },
     "7": {
       "type": "data",
-      "title": "Loop depth per ticket, by intent",
-      "description": "Mean and p90 LLM calls per ticket. The p90 is where a non-terminating loop shows up first.",
-      "query": "timeseries {\n  avg_calls = avg(o11yag.task.llm_calls),\n  p90_calls = percentile(o11yag.task.llm_calls, 90, rollup: avg)\n}, by: {intent}",
-      "visualization": "lineChart",
-      "visualizationSettings": {
-        "chartSettings": {
-          "curve": "smooth",
-          "gapPolicy": "connect",
-          "legend": {
-            "position": "bottom"
-          },
-          "xAxisScaling": "analyzedTimeframe"
-        }
-      },
+      "title": "Ticket mix by intent",
+      "description": "How the orchestrator routed tickets.",
+      "query": "fetch logs\n| filter k8s.namespace.name == \"o11yag-oa\" and (contains(content, \"o11yag.ticket.handled\"))\n| fieldsAdd line = splitString(content, \"\\n\")\n| expand line\n| filter startsWith(line, \"{\\\"audit.event.type\\\"\")\n| parse line, \"JSON:a\"\n| fieldsAdd ev = a[`audit.event.type`]\n| filter in(ev, {\"o11yag.ticket.handled\"})\n| fieldsAdd intent = toString(a[`audit.intent`]), outcome = toString(a[`audit.outcome`]), intent_source = toString(a[`audit.intent_source`]), latency_ms = toDouble(a[`audit.latency_ms`]), llm_calls = toDouble(a[`audit.llm_calls`]), tokens = toDouble(a[`audit.tokens`]), cost_usd = toDouble(a[`audit.cost_usd`])\n| summarize tickets = count(), by: {intent}",
+      "visualization": "donutChart",
+      "visualizationSettings": {},
       "querySettings": {
         "defaultSamplingRatio": 10,
         "defaultScanLimitGbytes": 500,
@@ -260,99 +227,9 @@
     },
     "8": {
       "type": "data",
-      "title": "Ticket latency, by intent",
-      "description": "Wall clock per ticket. Includes time waiting for a human approval \u2014 subtract o11yag.approval.wait for machine time.",
-      "query": "timeseries {\n  avg_ms = avg(o11yag.task.latency),\n  p95_ms = percentile(o11yag.task.latency, 95, rollup: avg)\n}, by: {intent}",
-      "visualization": "lineChart",
-      "visualizationSettings": {
-        "chartSettings": {
-          "curve": "smooth",
-          "gapPolicy": "connect",
-          "legend": {
-            "position": "bottom"
-          },
-          "xAxisScaling": "analyzedTimeframe"
-        }
-      },
-      "querySettings": {
-        "defaultSamplingRatio": 10,
-        "defaultScanLimitGbytes": 500,
-        "enableSampling": false,
-        "maxResultMegaBytes": 1,
-        "maxResultRecords": 1000
-      },
-      "davis": {
-        "davisVisualization": {
-          "isAvailable": true
-        },
-        "enabled": false
-      }
-    },
-    "9": {
-      "type": "data",
-      "title": "Tokens by intent",
-      "description": "Token consumption per intent \u2014 the driver behind the cost tile.",
-      "query": "timeseries tokens = sum(o11yag.task.tokens), by: {intent}",
-      "visualization": "areaChart",
-      "visualizationSettings": {
-        "chartSettings": {
-          "curve": "smooth",
-          "gapPolicy": "connect",
-          "legend": {
-            "position": "bottom"
-          },
-          "xAxisScaling": "analyzedTimeframe"
-        }
-      },
-      "querySettings": {
-        "defaultSamplingRatio": 10,
-        "defaultScanLimitGbytes": 500,
-        "enableSampling": false,
-        "maxResultMegaBytes": 1,
-        "maxResultRecords": 1000
-      },
-      "davis": {
-        "davisVisualization": {
-          "isAvailable": true
-        },
-        "enabled": false
-      }
-    },
-    "10": {
-      "type": "data",
-      "title": "Cost by intent",
-      "description": "Which kind of ticket is expensive, which is cheap.",
-      "query": "timeseries cost_usd = sum(o11yag.task.cost.usd), by: {intent}",
-      "visualization": "areaChart",
-      "visualizationSettings": {
-        "chartSettings": {
-          "curve": "smooth",
-          "gapPolicy": "connect",
-          "legend": {
-            "position": "bottom"
-          },
-          "xAxisScaling": "analyzedTimeframe"
-        }
-      },
-      "querySettings": {
-        "defaultSamplingRatio": 10,
-        "defaultScanLimitGbytes": 500,
-        "enableSampling": false,
-        "maxResultMegaBytes": 1,
-        "maxResultRecords": 1000
-      },
-      "davis": {
-        "davisVisualization": {
-          "isAvailable": true
-        },
-        "enabled": false
-      }
-    },
-    "11": {
-      "type": "data",
-      "title": "MCP tool calls",
-      "description": "What the agent actually did to the systems of record, by tool and outcome. This is the half of an agent stack that is normally a blind spot.",
-      "query": "timeseries c = sum(o11yag.tool.calls), by: {tool, outcome}\n| fieldsAdd calls = arraySum(c)\n| fields tool, outcome, calls\n| sort calls desc",
+      "title": "Who decided the intent",
+      "description": "model = the LLM's one-word answer was used; heuristic_* = the keyword rules decided because the answer was unusable or the call failed. Every ticket makes the LLM call regardless.",
+      "query": "fetch logs\n| filter k8s.namespace.name == \"o11yag-oa\" and (contains(content, \"o11yag.ticket.handled\"))\n| fieldsAdd line = splitString(content, \"\\n\")\n| expand line\n| filter startsWith(line, \"{\\\"audit.event.type\\\"\")\n| parse line, \"JSON:a\"\n| fieldsAdd ev = a[`audit.event.type`]\n| filter in(ev, {\"o11yag.ticket.handled\"})\n| fieldsAdd intent = toString(a[`audit.intent`]), outcome = toString(a[`audit.outcome`]), intent_source = toString(a[`audit.intent_source`]), latency_ms = toDouble(a[`audit.latency_ms`]), llm_calls = toDouble(a[`audit.llm_calls`]), tokens = toDouble(a[`audit.tokens`]), cost_usd = toDouble(a[`audit.cost_usd`])\n| summarize tickets = count(), by: {intent_source}\n| sort tickets desc",
       "visualization": "categoricalBarChart",
       "visualizationSettings": {},
       "querySettings": {
@@ -369,12 +246,102 @@
         "enabled": false
       }
     },
+    "9": {
+      "type": "data",
+      "title": "LLM calls per ticket, by intent",
+      "description": "Average llm_calls per ticket. No fixed call graph, so this series is the baseline.",
+      "query": "fetch logs\n| filter k8s.namespace.name == \"o11yag-oa\" and (contains(content, \"o11yag.ticket.handled\"))\n| fieldsAdd line = splitString(content, \"\\n\")\n| expand line\n| filter startsWith(line, \"{\\\"audit.event.type\\\"\")\n| parse line, \"JSON:a\"\n| fieldsAdd ev = a[`audit.event.type`]\n| filter in(ev, {\"o11yag.ticket.handled\"})\n| fieldsAdd intent = toString(a[`audit.intent`]), outcome = toString(a[`audit.outcome`]), intent_source = toString(a[`audit.intent_source`]), latency_ms = toDouble(a[`audit.latency_ms`]), llm_calls = toDouble(a[`audit.llm_calls`]), tokens = toDouble(a[`audit.tokens`]), cost_usd = toDouble(a[`audit.cost_usd`])\n| makeTimeseries llm_calls = avg(llm_calls), by: {intent}",
+      "visualization": "lineChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "curve": "smooth",
+          "gapPolicy": "connect",
+          "legend": {
+            "position": "bottom"
+          },
+          "xAxisScaling": "analyzedTimeframe"
+        }
+      },
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "10": {
+      "type": "data",
+      "title": "Ticket latency p90 (ms), by intent",
+      "description": "latency_ms from the audit record. Includes human/auto-approval wait for order actions.",
+      "query": "fetch logs\n| filter k8s.namespace.name == \"o11yag-oa\" and (contains(content, \"o11yag.ticket.handled\"))\n| fieldsAdd line = splitString(content, \"\\n\")\n| expand line\n| filter startsWith(line, \"{\\\"audit.event.type\\\"\")\n| parse line, \"JSON:a\"\n| fieldsAdd ev = a[`audit.event.type`]\n| filter in(ev, {\"o11yag.ticket.handled\"})\n| fieldsAdd intent = toString(a[`audit.intent`]), outcome = toString(a[`audit.outcome`]), intent_source = toString(a[`audit.intent_source`]), latency_ms = toDouble(a[`audit.latency_ms`]), llm_calls = toDouble(a[`audit.llm_calls`]), tokens = toDouble(a[`audit.tokens`]), cost_usd = toDouble(a[`audit.cost_usd`])\n| makeTimeseries p90_ms = percentile(latency_ms, 90), by: {intent}",
+      "visualization": "lineChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "curve": "smooth",
+          "gapPolicy": "connect",
+          "legend": {
+            "position": "bottom"
+          },
+          "xAxisScaling": "analyzedTimeframe"
+        }
+      },
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "11": {
+      "type": "data",
+      "title": "Tokens by intent",
+      "description": "Tokens per ticket, summed, as reported back by the workers.",
+      "query": "fetch logs\n| filter k8s.namespace.name == \"o11yag-oa\" and (contains(content, \"o11yag.ticket.handled\"))\n| fieldsAdd line = splitString(content, \"\\n\")\n| expand line\n| filter startsWith(line, \"{\\\"audit.event.type\\\"\")\n| parse line, \"JSON:a\"\n| fieldsAdd ev = a[`audit.event.type`]\n| filter in(ev, {\"o11yag.ticket.handled\"})\n| fieldsAdd intent = toString(a[`audit.intent`]), outcome = toString(a[`audit.outcome`]), intent_source = toString(a[`audit.intent_source`]), latency_ms = toDouble(a[`audit.latency_ms`]), llm_calls = toDouble(a[`audit.llm_calls`]), tokens = toDouble(a[`audit.tokens`]), cost_usd = toDouble(a[`audit.cost_usd`])\n| makeTimeseries tokens = sum(tokens), by: {intent}",
+      "visualization": "areaChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "curve": "smooth",
+          "gapPolicy": "connect",
+          "legend": {
+            "position": "bottom"
+          },
+          "xAxisScaling": "analyzedTimeframe"
+        }
+      },
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
     "12": {
       "type": "data",
-      "title": "Retrieval quality",
-      "description": "Best similarity score and chunks returned per RAG query. Retrieval latency being fine tells you nothing; this tells you whether the answer had anything to stand on.",
-      "query": "timeseries {\n  top_score = avg(o11yag.retrieval.top_score),\n  hits = avg(o11yag.retrieval.hits)\n}, by: {collection}",
-      "visualization": "lineChart",
+      "title": "Cost by intent (USD)",
+      "description": "cost_usd summed per intent.",
+      "query": "fetch logs\n| filter k8s.namespace.name == \"o11yag-oa\" and (contains(content, \"o11yag.ticket.handled\"))\n| fieldsAdd line = splitString(content, \"\\n\")\n| expand line\n| filter startsWith(line, \"{\\\"audit.event.type\\\"\")\n| parse line, \"JSON:a\"\n| fieldsAdd ev = a[`audit.event.type`]\n| filter in(ev, {\"o11yag.ticket.handled\"})\n| fieldsAdd intent = toString(a[`audit.intent`]), outcome = toString(a[`audit.outcome`]), intent_source = toString(a[`audit.intent_source`]), latency_ms = toDouble(a[`audit.latency_ms`]), llm_calls = toDouble(a[`audit.llm_calls`]), tokens = toDouble(a[`audit.tokens`]), cost_usd = toDouble(a[`audit.cost_usd`])\n| makeTimeseries cost_usd = sum(cost_usd), by: {intent}",
+      "visualization": "areaChart",
       "visualizationSettings": {
         "chartSettings": {
           "curve": "smooth",
@@ -401,17 +368,34 @@
     },
     "13": {
       "type": "markdown",
-      "content": "### If a tile is empty\n\n**Empty is the healthy case for three tiles** \u2014 Human feedback, Security detections, and (when no attack is switched on) parts of Answer quality. They are the tiles where \"nothing to report\" and \"nothing arriving\" look the same, so check **Tickets handled** first: if that has data, the pipeline is fine.\n\n**Retrieval and Answer quality tiles empty** means no ticket routed to `question`. Check the ticket mix tile above before suspecting Qdrant or the judge.\n\n**Nothing at all** usually means the Collector is dropping data. Its own log says so: `kubectl logs -l app.kubernetes.io/name=o11yag-otel-collector -n o11yag`.\n\nAudit records (tool arguments, approval decisions, conversation text, injection findings) are OTLP **logs**, not metrics, and are not on this dashboard at all \u2014 they need the `logs.ingest` token scope. Query them with `fetch logs | filter isNotNull(audit.event.type)`."
+      "content": "### Tools, approvals, refunds — from `o11yag.tool.*`, `o11yag.approval.*` and `o11yag.crm.refund_issued` audit records"
     },
     "14": {
-      "type": "markdown",
-      "content": "## Answer quality, human feedback, and the security act\n\nThe series added with the answer judge and the adversarial detectors, plus the approval gate's own wait time.\n\n**Three of these are empty in the healthy case**, which looks exactly like a broken tile. Each description below says what empty means for that tile \u2014 read it before concluding the pipeline is down."
+      "type": "data",
+      "title": "MCP tool calls",
+      "description": "o11yag.tool.called (with approval status) and o11yag.tool.blocked (with the gate's decision). 'blocked (timeout)' is a refund over AUTO_APPROVE_MAX_EUR that nobody decided.",
+      "query": "fetch logs\n| filter k8s.namespace.name == \"o11yag-oa\" and (contains(content, \"o11yag.tool.called\") or contains(content, \"o11yag.tool.blocked\"))\n| fieldsAdd line = splitString(content, \"\\n\")\n| expand line\n| filter startsWith(line, \"{\\\"audit.event.type\\\"\")\n| parse line, \"JSON:a\"\n| fieldsAdd ev = a[`audit.event.type`]\n| filter in(ev, {\"o11yag.tool.called\", \"o11yag.tool.blocked\"})\n| fieldsAdd tool = toString(a[`audit.tool`]), result = if(ev == \"o11yag.tool.blocked\", concat(\"blocked (\", toString(a[`audit.decision`]), \")\"), else: concat(\"called, approval \", toString(a[`audit.approved`])))\n| summarize calls = count(), by: {tool, result}\n| sort calls desc",
+      "visualization": "categoricalBarChart",
+      "visualizationSettings": {},
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
     },
     "15": {
       "type": "data",
-      "title": "Answer quality",
-      "description": "Groundedness verdicts on answers that were actually given \u2014 the failure the retrieval score cannot see, because the document retrieved was the right one. `unsupported` means the answer stated something its extracts do not. Empty means no ticket was routed to `question`, or JUDGE_MODE is off.",
-      "query": "timeseries answers = sum(o11yag.answer.quality), by: {verdict}",
+      "title": "Approval wait, longest per minute (s)",
+      "description": "waited_s on o11yag.approval.decided, by who decided. Approvals that time out never get a decided record and do not appear here.",
+      "query": "fetch logs\n| filter k8s.namespace.name == \"o11yag-oa\" and (contains(content, \"o11yag.approval.decided\"))\n| fieldsAdd line = splitString(content, \"\\n\")\n| expand line\n| filter startsWith(line, \"{\\\"audit.event.type\\\"\")\n| parse line, \"JSON:a\"\n| fieldsAdd ev = a[`audit.event.type`]\n| filter in(ev, {\"o11yag.approval.decided\"})\n| fieldsAdd waited_s = toDouble(a[`audit.waited_s`]), decided_by = toString(a[`audit.decided_by`])\n| makeTimeseries max_wait_s = max(waited_s), by: {decided_by}",
       "visualization": "lineChart",
       "visualizationSettings": {
         "chartSettings": {
@@ -439,159 +423,9 @@
     },
     "16": {
       "type": "data",
-      "title": "Verdicts, by who decided them",
-      "description": "The same verdicts split by grader. `heuristic` is the deterministic check \u2014 an invented figure, or an answer whose words are absent from its extracts. `model` is the judge model. Rising `unsupported` decided by `heuristic` is the model inventing numbers; the same count decided by `model` may only be a weak judge. Summed into one series they cancel, which is why this is its own tile. A judge that never decides anything shows here as `model` never appearing.",
-      "query": "timeseries answers = sum(o11yag.answer.quality), by: {verdict, decided_by}",
-      "visualization": "lineChart",
-      "visualizationSettings": {
-        "chartSettings": {
-          "curve": "smooth",
-          "gapPolicy": "connect",
-          "legend": {
-            "position": "bottom"
-          },
-          "xAxisScaling": "analyzedTimeframe"
-        }
-      },
-      "querySettings": {
-        "defaultSamplingRatio": 10,
-        "defaultScanLimitGbytes": 500,
-        "enableSampling": false,
-        "maxResultMegaBytes": 1,
-        "maxResultRecords": 1000
-      },
-      "davis": {
-        "davisVisualization": {
-          "isAvailable": true
-        },
-        "enabled": false
-      }
-    },
-    "17": {
-      "type": "data",
-      "title": "Human feedback",
-      "description": "Ratings from POST /feedback \u2014 the only signal on this dashboard the stack does not generate about itself, and so the only one that can contradict the rest. **Empty is the normal case**: nothing sends feedback automatically, deliberately. A stream of `down` against a healthy Answer quality tile means the judge is wrong, and no internal signal could have told you.",
-      "query": "timeseries ratings = sum(o11yag.feedback), by: {rating}",
-      "visualization": "lineChart",
-      "visualizationSettings": {
-        "chartSettings": {
-          "curve": "smooth",
-          "gapPolicy": "connect",
-          "legend": {
-            "position": "bottom"
-          },
-          "xAxisScaling": "analyzedTimeframe"
-        }
-      },
-      "querySettings": {
-        "defaultSamplingRatio": 10,
-        "defaultScanLimitGbytes": 500,
-        "enableSampling": false,
-        "maxResultMegaBytes": 1,
-        "maxResultRecords": 1000
-      },
-      "davis": {
-        "davisVisualization": {
-          "isAvailable": true
-        },
-        "enabled": false
-      }
-    },
-    "18": {
-      "type": "data",
-      "title": "Security detections",
-      "description": "Prompt injection in the retrieved corpus, poisoned MCP tool descriptions, and tool-catalogue changes. **Empty is the healthy case** \u2014 every attack is off by default \u2014 so this tile reads identically whether nothing is happening or the whole pipeline is down. Check Tickets handled before trusting it. `action` separates a finding that was acted on (`quarantined`, `redacted`) from one only recorded (`observed`); they must never be summed.",
-      "query": "timeseries detections = sum(o11yag.security.events), by: {kind, action}",
-      "visualization": "lineChart",
-      "visualizationSettings": {
-        "chartSettings": {
-          "curve": "smooth",
-          "gapPolicy": "connect",
-          "legend": {
-            "position": "bottom"
-          },
-          "xAxisScaling": "analyzedTimeframe"
-        }
-      },
-      "querySettings": {
-        "defaultSamplingRatio": 10,
-        "defaultScanLimitGbytes": 500,
-        "enableSampling": false,
-        "maxResultMegaBytes": 1,
-        "maxResultRecords": 1000
-      },
-      "davis": {
-        "davisVisualization": {
-          "isAvailable": true
-        },
-        "enabled": false
-      }
-    },
-    "19": {
-      "type": "data",
-      "title": "Approval wait",
-      "description": "Human decision time, kept out of task latency on purpose: a reviewer who goes to lunch would otherwise swamp every percentile in the stack. Subtract it from o11yag.task.latency to get machine time. A `timeout` series pinned flat at APPROVAL_TIMEOUT_S (180s) is loadgen running unattended \u2014 refunds above AUTO_APPROVE_MAX_EUR always wait for a person, and nobody is there to decide.",
-      "query": "timeseries {\n  p50 = median(o11yag.approval.wait, rollup: avg),\n  p90 = percentile(o11yag.approval.wait, 90, rollup: avg)\n}, by: {decision}",
-      "visualization": "lineChart",
-      "visualizationSettings": {
-        "chartSettings": {
-          "curve": "smooth",
-          "gapPolicy": "connect",
-          "legend": {
-            "position": "bottom"
-          },
-          "xAxisScaling": "analyzedTimeframe"
-        }
-      },
-      "querySettings": {
-        "defaultSamplingRatio": 10,
-        "defaultScanLimitGbytes": 500,
-        "enableSampling": false,
-        "maxResultMegaBytes": 1,
-        "maxResultRecords": 1000
-      },
-      "davis": {
-        "davisVisualization": {
-          "isAvailable": true
-        },
-        "enabled": false
-      }
-    },
-    "20": {
-      "type": "data",
-      "title": "Who chose each tool call",
-      "description": "One count per executed agent step, split by who picked the tool: `model` (the LLM's own call, accepted) or `fallback` (the deterministic rules), and by `step.fallback_reason` \u2014 what was wrong with the model's answer (`unknown_tool`, `missing:order_id`, `unparseable`, `mode:rules`...). Only steps that ran a tool are counted: a model answering `done` ends the loop without a step span, so it never appears here. With qwen:0.5b, `model ok` is normally absent; its first appearance is the sign a better model is behind the gateway.",
-      "query": "fetch spans\n| filter startsWith(span.name, \"step_\") and isNotNull(step.decided_by)\n| makeTimeseries steps = count(),\n    by: {decided_by = step.decided_by, reason = coalesce(step.fallback_reason, \"model ok\")}",
-      "visualization": "barChart",
-      "visualizationSettings": {
-        "chartSettings": {
-          "curve": "smooth",
-          "gapPolicy": "connect",
-          "legend": {
-            "position": "bottom"
-          },
-          "xAxisScaling": "analyzedTimeframe"
-        }
-      },
-      "querySettings": {
-        "defaultSamplingRatio": 10,
-        "defaultScanLimitGbytes": 500,
-        "enableSampling": false,
-        "maxResultMegaBytes": 1,
-        "maxResultRecords": 1000
-      },
-      "davis": {
-        "davisVisualization": {
-          "isAvailable": true
-        },
-        "enabled": false
-      }
-    },
-    "21": {
-      "type": "data",
-      "title": "Refunds: who decided, and what happened",
-      "description": "Every `issue_refund` call, joined to the agent step that chose it and to the CRM's answer in the action-worker's `o11yag.tool.called` audit record. `decided_by`: `fallback` means the rules sent the ticket to the gate, not the model \u2014 governance working, but no evidence the model can decide a refund. `outcome`: `refunded` is money that actually moved. `not sent (gate: timeout|denied)` never reached the CRM \u2014 over AUTO_APPROVE_MAX_EUR with nobody deciding, or refused. `rejected by CRM: already_refunded` was approved by the gate but refused by the system of record, which refunds an order only once; the load generator replays the same ticket, so this row dominates. `approved, no CRM result` means the audit record is missing \u2014 worth investigating. Two joins over spans and logs: keep the range short.",
-      "query": "fetch spans\n| filter gen_ai.tool.name == \"issue_refund\" and span.name == \"mcp_tool_call.tool\"\n| fields trace.id, span.id, span.parent_id, approval.decision\n| join [ fetch spans | filter startsWith(span.name, \"step_\") | fields span.id, trace.id, step.decided_by ],\n    on: {left[span.parent_id] == right[span.id], left[trace.id] == right[trace.id]}, kind: leftOuter\n| fieldsAdd decided_by = coalesce(right.step.decided_by, \"unknown\"), tid = toString(trace.id), sid = toString(span.id)\n| fields tid, sid, decided_by, approval.decision\n| join [ fetch logs | filter audit.event.type == \"o11yag.tool.called\" and audit.tool == \"issue_refund\"\n         | fields audit.trace_id, audit.span_id, audit.result ],\n    on: {left[tid] == right[audit.trace_id], left[sid] == right[audit.span_id]}, kind: leftOuter\n| parse right.audit.result, \"JSON:crm\"\n| fieldsAdd outcome = if(approval.decision != \"approved\", concat(\"not sent (gate: \", approval.decision, \")\"),\n    else: if(crm[ok] == true, \"refunded\",\n    else: if(isNotNull(crm[error]), concat(\"rejected by CRM: \", crm[error]),\n    else: \"approved, no CRM result\")))\n| summarize refunds = count(), by: {decided_by, outcome}\n| sort refunds desc",
+      "title": "Refund decisions",
+      "description": "issue_refund approvals: who decided, what, and how long it waited.",
+      "query": "fetch logs\n| filter k8s.namespace.name == \"o11yag-oa\" and (contains(content, \"o11yag.approval.decided\"))\n| fieldsAdd line = splitString(content, \"\\n\")\n| expand line\n| filter startsWith(line, \"{\\\"audit.event.type\\\"\")\n| parse line, \"JSON:a\"\n| fieldsAdd ev = a[`audit.event.type`]\n| filter in(ev, {\"o11yag.approval.decided\"})\n| filter a[`audit.tool`] == \"issue_refund\"\n| fieldsAdd decided_by = toString(a[`audit.decided_by`]), decision = toString(a[`audit.decision`])\n| summarize decisions = count(), avg_wait_s = avg(toDouble(a[`audit.waited_s`])), by: {decided_by, decision}\n| sort decisions desc",
       "visualization": "table",
       "visualizationSettings": {},
       "querySettings": {
@@ -607,6 +441,342 @@
         },
         "enabled": false
       }
+    },
+    "17": {
+      "type": "data",
+      "title": "Refunds issued by the CRM",
+      "description": "o11yag.crm.refund_issued records written by mcp-crm.",
+      "query": "fetch logs\n| filter k8s.namespace.name == \"o11yag-oa\" and (contains(content, \"o11yag.crm.refund_issued\"))\n| fieldsAdd line = splitString(content, \"\\n\")\n| expand line\n| filter startsWith(line, \"{\\\"audit.event.type\\\"\")\n| parse line, \"JSON:a\"\n| fieldsAdd ev = a[`audit.event.type`]\n| filter in(ev, {\"o11yag.crm.refund_issued\"})\n| summarize refunds = count()",
+      "visualization": "singleValue",
+      "visualizationSettings": {
+        "singleValue": {
+          "label": "refunds",
+          "recordField": "refunds"
+        },
+        "unitsOverrides": [
+          {
+            "added": 1757030400000,
+            "baseUnit": "count",
+            "cascade": null,
+            "decimals": 0,
+            "delimiter": true,
+            "displayUnit": null,
+            "identifier": "refunds",
+            "suffix": "",
+            "unitCategory": "unspecified"
+          }
+        ]
+      },
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "18": {
+      "type": "markdown",
+      "content": "### Answers and security — from `o11yag.answer.*`, `o11yag.retrieval.ungrounded`, `o11yag.feedback.received` and `o11yag.security.*` audit records"
+    },
+    "19": {
+      "type": "data",
+      "title": "Retrieval top score",
+      "description": "Best similarity score per question. 'refused' = below MIN_SCORE, answered with the no-policy reply instead.",
+      "query": "fetch logs\n| filter k8s.namespace.name == \"o11yag-oa\" and (contains(content, \"o11yag.answer.generated\") or contains(content, \"o11yag.retrieval.ungrounded\"))\n| fieldsAdd line = splitString(content, \"\\n\")\n| expand line\n| filter startsWith(line, \"{\\\"audit.event.type\\\"\")\n| parse line, \"JSON:a\"\n| fieldsAdd ev = a[`audit.event.type`]\n| filter in(ev, {\"o11yag.answer.generated\", \"o11yag.retrieval.ungrounded\"})\n| fieldsAdd top_score = toDouble(a[`audit.top_score`]), kind = if(ev == \"o11yag.retrieval.ungrounded\", \"refused (below floor)\", else: \"answered\")\n| makeTimeseries top_score = avg(top_score), by: {kind}",
+      "visualization": "lineChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "curve": "smooth",
+          "gapPolicy": "connect",
+          "legend": {
+            "position": "bottom"
+          },
+          "xAxisScaling": "analyzedTimeframe"
+        }
+      },
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "20": {
+      "type": "data",
+      "title": "Answer quality",
+      "description": "Judge verdict on each generated answer (supported / unsupported).",
+      "query": "fetch logs\n| filter k8s.namespace.name == \"o11yag-oa\" and (contains(content, \"o11yag.answer.generated\"))\n| fieldsAdd line = splitString(content, \"\\n\")\n| expand line\n| filter startsWith(line, \"{\\\"audit.event.type\\\"\")\n| parse line, \"JSON:a\"\n| fieldsAdd ev = a[`audit.event.type`]\n| filter in(ev, {\"o11yag.answer.generated\"})\n| fieldsAdd verdict = toString(a[`audit.quality_verdict`])\n| makeTimeseries answers = count(), by: {verdict}",
+      "visualization": "lineChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "curve": "smooth",
+          "gapPolicy": "connect",
+          "legend": {
+            "position": "bottom"
+          },
+          "xAxisScaling": "analyzedTimeframe"
+        }
+      },
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "21": {
+      "type": "data",
+      "title": "Verdicts, by who decided them",
+      "description": "decided_by=heuristic means the judge model's reply was unusable and the deterministic check decided.",
+      "query": "fetch logs\n| filter k8s.namespace.name == \"o11yag-oa\" and (contains(content, \"o11yag.answer.generated\"))\n| fieldsAdd line = splitString(content, \"\\n\")\n| expand line\n| filter startsWith(line, \"{\\\"audit.event.type\\\"\")\n| parse line, \"JSON:a\"\n| fieldsAdd ev = a[`audit.event.type`]\n| filter in(ev, {\"o11yag.answer.generated\"})\n| fieldsAdd verdict = toString(a[`audit.quality_verdict`]), decided_by = toString(a[`audit.quality_decided_by`])\n| summarize answers = count(), by: {decided_by, verdict}\n| sort answers desc",
+      "visualization": "categoricalBarChart",
+      "visualizationSettings": {},
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "22": {
+      "type": "data",
+      "title": "Human feedback",
+      "description": "POST /feedback verdicts. Empty until someone sends feedback.",
+      "query": "fetch logs\n| filter k8s.namespace.name == \"o11yag-oa\" and (contains(content, \"o11yag.feedback.received\"))\n| fieldsAdd line = splitString(content, \"\\n\")\n| expand line\n| filter startsWith(line, \"{\\\"audit.event.type\\\"\")\n| parse line, \"JSON:a\"\n| fieldsAdd ev = a[`audit.event.type`]\n| filter in(ev, {\"o11yag.feedback.received\"})\n| fieldsAdd rating = toString(a[`audit.rating`])\n| makeTimeseries verdicts = count(), by: {rating}",
+      "visualization": "lineChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "curve": "smooth",
+          "gapPolicy": "connect",
+          "legend": {
+            "position": "bottom"
+          },
+          "xAxisScaling": "analyzedTimeframe"
+        }
+      },
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "23": {
+      "type": "data",
+      "title": "Security detections",
+      "description": "Injected instructions in retrieved documents, poisoned tool descriptions, and tool catalogue changes, by action taken. Empty is the healthy case.",
+      "query": "fetch logs\n| filter k8s.namespace.name == \"o11yag-oa\" and (contains(content, \"o11yag.security.injection_detected\") or contains(content, \"o11yag.security.tool_poisoned\") or contains(content, \"o11yag.security.tool_catalogue_changed\"))\n| fieldsAdd line = splitString(content, \"\\n\")\n| expand line\n| filter startsWith(line, \"{\\\"audit.event.type\\\"\")\n| parse line, \"JSON:a\"\n| fieldsAdd ev = a[`audit.event.type`]\n| filter in(ev, {\"o11yag.security.injection_detected\", \"o11yag.security.tool_poisoned\", \"o11yag.security.tool_catalogue_changed\"})\n| fieldsAdd kind = replaceString(ev, \"o11yag.security.\", \"\"), action = coalesce(toString(a[`audit.action`]), \"observed\")\n| makeTimeseries detections = count(), by: {kind, action}",
+      "visualization": "lineChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "curve": "smooth",
+          "gapPolicy": "connect",
+          "legend": {
+            "position": "bottom"
+          },
+          "xAxisScaling": "analyzedTimeframe"
+        }
+      },
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "24": {
+      "type": "markdown",
+      "content": "### What OneAgent sees — spans\n\nEverything in this section is captured by OneAgent with no code in the app. LLM calls come from OneAgent's OpenAI-SDK sensor (code module 1.347.49). The openai.chat spans checked carry model, token and finish-reason attributes but no prompt or completion text."
+    },
+    "25": {
+      "type": "data",
+      "title": "LLM calls (OneAgent)",
+      "description": "openai.chat and openai.embeddings spans per minute, by service.",
+      "query": "fetch spans\n| filter k8s.namespace.name == \"o11yag-oa\"\n| filter in(span.name, {\"openai.chat\", \"openai.embeddings\"})\n| makeTimeseries calls = count(), by: {k8s.workload.name, span.name}",
+      "visualization": "lineChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "curve": "smooth",
+          "gapPolicy": "connect",
+          "legend": {
+            "position": "bottom"
+          },
+          "xAxisScaling": "analyzedTimeframe"
+        }
+      },
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "26": {
+      "type": "data",
+      "title": "LLM call latency p90 (s) (OneAgent)",
+      "description": "openai.chat span duration. This is the time to the gateway and back, including Ollama.",
+      "query": "fetch spans\n| filter k8s.namespace.name == \"o11yag-oa\"\n| filter span.name == \"openai.chat\"\n| fieldsAdd seconds = duration / 1s\n| makeTimeseries p90_s = percentile(seconds, 90), by: {k8s.workload.name}",
+      "visualization": "lineChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "curve": "smooth",
+          "gapPolicy": "connect",
+          "legend": {
+            "position": "bottom"
+          },
+          "xAxisScaling": "analyzedTimeframe"
+        }
+      },
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "27": {
+      "type": "data",
+      "title": "LLM tokens by service and model alias (OneAgent)",
+      "description": "gen_ai.usage.* on openai.chat spans. support-judge is the knowledge worker's answer judge.",
+      "query": "fetch spans\n| filter k8s.namespace.name == \"o11yag-oa\"\n| filter span.name == \"openai.chat\"\n| summarize input_tokens = sum(gen_ai.usage.input_tokens), output_tokens = sum(gen_ai.usage.output_tokens), calls = count(), by: {k8s.workload.name, gen_ai.request.model}\n| sort calls desc",
+      "visualization": "table",
+      "visualizationSettings": {},
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "28": {
+      "type": "data",
+      "title": "Endpoints (OneAgent)",
+      "description": "Server spans, health checks excluded. p50/p90 duration.",
+      "query": "fetch spans\n| filter k8s.namespace.name == \"o11yag-oa\"\n| filter span.kind == \"server\" and not endsWith(span.name, \"/health\")\n| summarize requests = count(), failed = countIf(request.is_failed == true), p50 = percentile(duration, 50), p90 = percentile(duration, 90), by: {k8s.workload.name, span.name}\n| sort requests desc",
+      "visualization": "table",
+      "visualizationSettings": {},
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "29": {
+      "type": "data",
+      "title": "Which services share a trace (OneAgent)",
+      "description": "Distinct services per trace. mcp-crm and litellm never appear; Ollama traces stand alone.",
+      "query": "fetch spans\n| filter k8s.namespace.name == \"o11yag-oa\"\n| filterOut endsWith(span.name, \"/health\")\n| summarize workloads = collectDistinct(k8s.workload.name), by: {trace.id}\n| fieldsAdd services_in_trace = arrayToString(arraySort(workloads), delimiter: \" + \")\n| summarize traces = count(), by: {services_in_trace}\n| sort traces desc",
+      "visualization": "table",
+      "visualizationSettings": {},
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "30": {
+      "type": "data",
+      "title": "Services with no spans (OneAgent)",
+      "description": "Span count per workload that upstream instruments or that sits on the request path. 0 = invisible to tracing here.",
+      "query": "data record(workload = \"o11yag-mcp-crm\"), record(workload = \"o11yag-litellm\"), record(workload = \"o11yag-loadgen\"), record(workload = \"o11yag-qdrant\"), record(workload = \"o11yag-redis\")\n| lookup [fetch spans | filter k8s.namespace.name == \"o11yag-oa\" | summarize spans = count(), by: {k8s.workload.name}], sourceField: workload, lookupField: k8s.workload.name, fields: {spans}\n| fieldsAdd spans = coalesce(spans, 0)",
+      "visualization": "table",
+      "visualizationSettings": {},
+      "querySettings": {
+        "defaultSamplingRatio": 10,
+        "defaultScanLimitGbytes": 500,
+        "enableSampling": false,
+        "maxResultMegaBytes": 1,
+        "maxResultRecords": 1000
+      },
+      "davis": {
+        "davisVisualization": {
+          "isAvailable": true
+        },
+        "enabled": false
+      }
+    },
+    "31": {
+      "type": "markdown",
+      "content": "### What OneAgent does not capture here (measured 2026-10-01, compare docs/TELEMETRY.md)\n\n- **The MCP hop.** `o11yag-mcp-crm` (uvicorn/ASGI) produces no spans, and the action worker's MCP calls (httpx2) produce no client spans. The tool calls are visible only as `o11yag.tool.called` audit records.\n- **The model gateway.** `o11yag-litellm` produces no spans. Ollama's own spans (`POST /api/generate`, `/api/embed`) land in traces of their own, so an LLM call is not joined to the Ollama work behind it.\n- **loadgen, Qdrant, Redis server.** No spans. Redis appears only as client spans from approvals.\n- **Agent structure.** No step, tool, judge or approval-wait spans, and no `step.decided_by`: who chose each tool call is not recorded anywhere here.\n- **Business metrics.** No `o11yag.*` metrics; the ticket tiles compute the same numbers from audit records at query time.\n- **Trace id on audit records.** None, so audit records cannot be joined to traces. Upstream's refunds tile depended on that join.\n- **Service names.** All Flask services are detected as `app`, and `k8s.deployment.name` arrives masked (`o*yag-…`)."
     }
   },
   "layouts": {
@@ -614,132 +784,192 @@
       "x": 0,
       "y": 0,
       "w": 24,
-      "h": 4
+      "h": 6
     },
     "1": {
       "x": 0,
-      "y": 4,
-      "w": 6,
-      "h": 4
+      "y": 6,
+      "w": 24,
+      "h": 1
     },
     "2": {
-      "x": 6,
-      "y": 4,
+      "x": 0,
+      "y": 7,
       "w": 6,
       "h": 4
     },
     "3": {
-      "x": 12,
-      "y": 4,
+      "x": 6,
+      "y": 7,
       "w": 6,
       "h": 4
     },
     "4": {
-      "x": 18,
-      "y": 4,
+      "x": 12,
+      "y": 7,
       "w": 6,
       "h": 4
     },
     "5": {
-      "x": 0,
-      "y": 8,
-      "w": 12,
-      "h": 7
+      "x": 18,
+      "y": 7,
+      "w": 6,
+      "h": 4
     },
     "6": {
-      "x": 12,
-      "y": 8,
+      "x": 0,
+      "y": 11,
       "w": 12,
       "h": 7
     },
     "7": {
-      "x": 0,
-      "y": 15,
-      "w": 12,
+      "x": 12,
+      "y": 11,
+      "w": 6,
       "h": 7
     },
     "8": {
-      "x": 12,
-      "y": 15,
-      "w": 12,
+      "x": 18,
+      "y": 11,
+      "w": 6,
       "h": 7
     },
     "9": {
       "x": 0,
-      "y": 22,
+      "y": 18,
       "w": 12,
       "h": 7
     },
     "10": {
       "x": 12,
-      "y": 22,
+      "y": 18,
       "w": 12,
       "h": 7
     },
     "11": {
       "x": 0,
-      "y": 29,
+      "y": 25,
       "w": 12,
       "h": 7
     },
     "12": {
       "x": 12,
-      "y": 29,
+      "y": 25,
       "w": 12,
       "h": 7
     },
     "13": {
       "x": 0,
-      "y": 67,
+      "y": 32,
       "w": 24,
-      "h": 5
+      "h": 1
     },
     "14": {
       "x": 0,
-      "y": 36,
-      "w": 24,
-      "h": 3
+      "y": 33,
+      "w": 12,
+      "h": 7
     },
     "15": {
-      "x": 0,
-      "y": 39,
+      "x": 12,
+      "y": 33,
       "w": 12,
       "h": 7
     },
     "16": {
-      "x": 12,
-      "y": 39,
-      "w": 12,
-      "h": 7
+      "x": 0,
+      "y": 40,
+      "w": 16,
+      "h": 6
     },
     "17": {
-      "x": 0,
-      "y": 46,
-      "w": 12,
-      "h": 7
+      "x": 16,
+      "y": 40,
+      "w": 8,
+      "h": 6
     },
     "18": {
-      "x": 12,
+      "x": 0,
       "y": 46,
-      "w": 12,
-      "h": 7
+      "w": 24,
+      "h": 1
     },
     "19": {
       "x": 0,
-      "y": 53,
-      "w": 24,
+      "y": 47,
+      "w": 12,
       "h": 7
     },
     "20": {
-      "x": 0,
-      "y": 60,
+      "x": 12,
+      "y": 47,
       "w": 12,
       "h": 7
     },
     "21": {
-      "x": 12,
-      "y": 60,
+      "x": 0,
+      "y": 54,
       "w": 12,
+      "h": 7
+    },
+    "22": {
+      "x": 12,
+      "y": 54,
+      "w": 12,
+      "h": 7
+    },
+    "23": {
+      "x": 0,
+      "y": 61,
+      "w": 24,
+      "h": 7
+    },
+    "24": {
+      "x": 0,
+      "y": 68,
+      "w": 24,
+      "h": 2
+    },
+    "25": {
+      "x": 0,
+      "y": 70,
+      "w": 12,
+      "h": 7
+    },
+    "26": {
+      "x": 12,
+      "y": 70,
+      "w": 12,
+      "h": 7
+    },
+    "27": {
+      "x": 0,
+      "y": 77,
+      "w": 12,
+      "h": 7
+    },
+    "28": {
+      "x": 12,
+      "y": 77,
+      "w": 12,
+      "h": 7
+    },
+    "29": {
+      "x": 0,
+      "y": 84,
+      "w": 12,
+      "h": 7
+    },
+    "30": {
+      "x": 12,
+      "y": 84,
+      "w": 12,
+      "h": 7
+    },
+    "31": {
+      "x": 0,
+      "y": 91,
+      "w": 24,
       "h": 7
     }
   }

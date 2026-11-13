@@ -219,11 +219,16 @@ the fragile part, not the code, because the ecosystem is mid-migration from
 1. **Start Kubernetes on Docker Desktop** with headroom for Ollama:
    memory ≥ 8192, cpus ≥ 4.
 
-2. **Install the Dynatrace Operator** on the cluster. It creates the `dynatrace`
-   namespace and the DynaKube CRD; `build_deploy.sh` stops with a message if
-   they are missing (or pass `--no-oneagent` to deploy uninstrumented).
+2. **Install the Dynatrace Operator and a DynaKube** on the cluster. By default
+   `build_deploy.sh` does **not** apply a DynaKube of its own, and says so when it
+   starts: the pods get OneAgent from whatever DynaKube already injects into
+   `o11yag-oa`, and stay uninstrumented if there is none. Pass `--oneagent` to
+   apply this repo's DynaKube, which is scoped to `o11yag-oa`. The operator
+   rejects it if another DynaKube already covers the same node or namespaces,
+   so `--oneagent` only works on a cluster with no other DynaKube. Step 3
+   applies only with `--oneagent`.
 
-3. **Set the Dynatrace variables**:
+3. **Set the Dynatrace variables** (only with `--oneagent`):
    ```
    export DT_TENANT='abc12345'      # first part of your Dynatrace URL
    export DT_API_TOKEN='...'
@@ -240,8 +245,8 @@ the fragile part, not the code, because the ecosystem is mid-migration from
    ```
    bash build_deploy.sh
    ```
-   It has no shebang, so run it with `bash`. OneAgent is set up before any
-   workload, because the webhook injects at pod creation. First start is slow:
+   It has no shebang, so run it with `bash`. With `--oneagent`, the DynaKube is
+   applied before any workload, because the webhook injects at pod creation. First start is slow:
    Ollama downloads two models (~700MB) before it is ready, and the knowledge
    worker seeds Qdrant on its first boot.
 
